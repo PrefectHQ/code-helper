@@ -1,0 +1,15 @@
+transformers
+torch
+InstructorEmbedding
+sqlalchemy
+sentence-transformers==2.2.2
+psycopg2-binary
+prefect
+fastapi
+pgvector
+marvin
+requests
+alembic
+pytest
+marvin
+protobuf
