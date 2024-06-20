@@ -4,7 +4,7 @@ InstructorEmbedding
 sqlalchemy
 sentence-transformers==2.2.2
 psycopg2-binary
-prefect
+prefect>=3.0.0rc3
 fastapi
 pgvector
 marvin

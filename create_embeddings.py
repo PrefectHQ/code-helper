@@ -141,7 +141,7 @@ def process_file(filepath):
 
     cleaned_content = clean_text(file_content)
 
-    # Summarize the file as a whole for TF-IDF/keyword search
+    # Summarize the fileatjkas a whole for TF-IDF/keyword search
     file_summary = summarize_code(cleaned_content)
 
     # 1. Create embeddings for the file as a whole.
