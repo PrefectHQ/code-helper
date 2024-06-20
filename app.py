@@ -1,6 +1,8 @@
+import re
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from InstructorEmbedding import INSTRUCTOR
+from numpy import extract
 from models import get_session, hybrid_search
 from schemas import SearchResponse, SearchRequest
 from logging import getLogger
@@ -39,6 +41,12 @@ app = FastAPI(
 )
 
 
+def extract_filenames(query_string: str):
+    filename_regex = re.compile(r"([^/]+\.py)")
+    matches = filename_regex.findall(query_string)
+    return matches
+
+
 @app.post("/v1/search_embeddings", response_model=SearchResponse)
 def search_embeddings(request: SearchRequest):
     """
@@ -46,10 +54,11 @@ def search_embeddings(request: SearchRequest):
     """
     query_text = request.query_text
     session = get_session()
+    filenames = extract_filenames(query_text)
 
     try:
         query_vector = vectorize_query(query_text)
-        results = hybrid_search(session, query_text, query_vector)
+        results = hybrid_search(session, query_text, query_vector, filenames)
 
         return {"results": results}
     finally:

@@ -23,7 +23,7 @@ def visit_url(url: str):
 
 def query_knowledge(query_text: str) -> SearchResponse:
     """
-    Query an external knowledge base for code examples. Use this whenever you 
+    Query an external knowledge base for code examples. Use this whenever you
     receive a query about code or need to generate code.
     """
     response = requests.post(
@@ -75,7 +75,7 @@ code base using your knowledge, any files in your knowledge base, and by using
 Actions that let you query external knowledge stores via API calls.
 """
 
-# The assistant won't use the query_knowledge tool unless it's explicitly 
+# The assistant won't use the query_knowledge tool unless it's explicitly
 # reminded to do so. To avoid having to remember to tell it every time the code
 # search API would be relevant, we add a reminder to every message.
 SPECIAL_INSTRUCTION = """
@@ -122,7 +122,7 @@ class CodeAssistant(Assistant):
         )
         result = await run.run_async()
         return result
-        
+
 
 
 

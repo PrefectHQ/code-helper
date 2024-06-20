@@ -1,4 +1,6 @@
+from collections import defaultdict
 from datetime import datetime
+from typing import List, Optional
 from sqlalchemy import (
     create_engine,
     Column,
@@ -85,36 +87,47 @@ def keyword_search_documents(session: Session, query: str, limit: int = 10):
         LIMIT :limit
         """
     )
-    results = session.execute(search_query, {"query": query_or, "limit": limit}).fetchall()
+    results = session.execute(
+        search_query, {"query": query_or, "limit": limit}
+    ).fetchall()
     return results
 
 
 def keyword_search_document_fragments(
-    session: Session, query: str, document_ids, limit: int = 20
+    session: Session,
+    query_text: str,
+    document_ids,
+    filenames: Optional[List[str]] = None,
+    limit: int = 20,
 ):
-    query_or = "|".join(query.split())
-    search_query = text(
+    query_or = "|".join(query_text.split())
+    opts = {"query": query_or, "limit": limit, "document_ids": document_ids}
+    if filenames:
+        opts["filenames"] = filenames
+
+    query = (
         """
-        SELECT * FROM document_fragments
+        SELECT document_fragments.id, documents.id as document_id, document_fragments.fragment_content, document_fragments.summary, documents.filename, documents.filepath, document_fragments.meta
+        FROM document_fragments
         LEFT JOIN documents ON documents.id = document_fragments.document_id
         WHERE document_fragments.document_id = ANY(:document_ids)          
          AND (
           fragment_content_tsv @@ to_tsquery(:query)
           OR document_fragments.summary_tsv @@ to_tsquery(:query)
           )
+    """
+        + ("AND filename = ANY(:filenames)" if filenames else "")
+        + """
         ORDER BY ts_rank(fragment_content_tsv, to_tsquery(:query)) DESC
         LIMIT :limit
-        """
+    """
     )
-    results = session.execute(
-        search_query, {"query": query_or, "limit": limit, "document_ids": document_ids}
-    ).fetchall()
+
+    results = session.execute(text(query), opts).fetchall()
     return results
 
 
-def vector_search_documents(
-    session, query_vector, limit=10
-):
+def vector_search_documents(session, query_vector, limit=10):
     query_fragments = text(
         """
         SELECT *, documents.vector <-> :query_vector as score
@@ -134,68 +147,78 @@ def vector_search_documents(
 
 
 def vector_search_document_fragments(
-    session, query_vector, document_ids=None, limit=20
+    session, query_vector, document_ids=None, filenames=None, limit=20
 ):
-    query_fragments = text(
+    opts = {
+        "query_vector": str(query_vector),
+        "limit": limit,
+        "document_ids": document_ids,
+    }
+    if filenames:
+        opts["filenames"] = filenames
+
+    query = (
         """
-        SELECT document_fragments.vector, documents.id as document_id, document_fragments.meta as meta, documents.filename as filename, documents.filepath as filepath, document_fragments.fragment_content as fragment_content, document_fragments.vector <-> :query_vector as score
+        SELECT document_fragments.id, documents.id as document_id, document_fragments.fragment_content, document_fragments.summary, documents.filename, documents.filepath, document_fragments.meta, document_fragments.vector <-> :query_vector as score
         FROM document_fragments
         LEFT JOIN documents ON documents.id = document_fragments.document_id
         WHERE document_fragments.document_id = ANY(:document_ids)
+    """
+        + ("AND filename = ANY(:filenames)" if filenames else "")
+        + """
         ORDER BY score
         LIMIT :limit
-        """
+    """
     )
+    query_fragments = text(query)
 
     return session.execute(
         query_fragments,
-        {
-            "query_vector": str(query_vector),
-            "limit": limit,
-            "document_ids": document_ids,
-        },
+        opts,
     ).fetchall()
 
 
 def reciprocal_rank_fusion(vector_results, keyword_results, k=60):
-    rank_dict = {}
+    rank_dict = defaultdict(float)
 
     # Assign ranks to vector search results
     for rank, result in enumerate(vector_results, start=1):
-        doc_id = result.document_id
-        if doc_id not in rank_dict:
-            rank_dict[doc_id] = 0
-        rank_dict[doc_id] += 1 / (rank + k)
+        rank_dict[result.id] += 1 / (rank + k)
 
     # Assign ranks to keyword search results
     for rank, result in enumerate(keyword_results, start=1):
-        doc_id = result.document_id
-        if doc_id not in rank_dict:
-            rank_dict[doc_id] = 0
-        rank_dict[doc_id] += 1 / (rank + k)
+        rank_dict[result.id] += 1 / (rank + k)
 
     # Sort results by their cumulative rank
     sorted_results = sorted(rank_dict.items(), key=lambda item: item[1], reverse=True)
     return sorted_results
 
 
-def hybrid_search(session: Session, query_text: str, query_vector: list[float]):
+def hybrid_search(
+    session: Session,
+    query_text: str,
+    query_vector: list[float],
+    filenames: Optional[List[str]] = None,
+):
     documents = keyword_search_documents(session, query_text)
     document_ids = [d.id for d in documents]
 
     vector_fragment_results = vector_search_document_fragments(
-        session, query_vector, document_ids
+        session, query_vector, document_ids, filenames=filenames
     )
     keyword_fragment_results = keyword_search_document_fragments(
-        session, query_text, document_ids
+        session, query_text, document_ids, filenames=filenames
     )
-
     combined_results = reciprocal_rank_fusion(
         vector_fragment_results, keyword_fragment_results
     )
-    fragments_by_doc_id = {
-        frag.document_id: frag
-        for frag in vector_fragment_results + keyword_fragment_results
+
+    import ipdb
+
+    ipdb.set_trace()
+
+    fragments_by_id = {
+        frag.id: frag for frag in vector_fragment_results + keyword_fragment_results
     }
 
     # Build the response based on the combined results sorted by their RRF score
@@ -205,15 +228,15 @@ def hybrid_search(session: Session, query_text: str, query_vector: list[float]):
     for frag_id, score in combined_results:
         if frag_id not in seen_fragments:
             seen_fragments.add(frag_id)
-            frag_row = fragments_by_doc_id[frag_id]
+            fragment = fragments_by_id[frag_id]
             response.append(
                 {
-                    "document_id": str(frag_row.document_id),
+                    "document_id": str(fragment.document_id),
                     "score": score,
-                    "filename": frag_row.filename,
-                    "filepath": frag_row.filepath,
-                    "fragment_content": frag_row.fragment_content,
-                    "metadata": frag_row.meta,
+                    "filename": fragment.filename,
+                    "filepath": fragment.filepath,
+                    "fragment_content": fragment.fragment_content,
+                    "metadata": fragment.meta,
                 }
             )
 
