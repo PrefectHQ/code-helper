@@ -63,7 +63,7 @@ make run-api
 
 #### Search Endpoint
 
-- **URL**: `/search_embeddings`
+- **URL**: `/v1/search_embeddings`
 - **Method**: `POST`
 - **Request Body**:
   ```json
