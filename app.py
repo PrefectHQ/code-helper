@@ -21,7 +21,9 @@ def get_model():
 
 
 def vectorize_query(query_text: str):
-    # Vectorize the query text using the Instructor model
+    """
+    Vectorize the query text using the Instructor-XL model
+    """
     model = get_model()
 
     # Test using the same instruction we used for embedding code
@@ -30,7 +32,6 @@ def vectorize_query(query_text: str):
     return model.encode([instruction, query_text])[0].tolist()
 
 
-# Create the FastAPI app
 app = FastAPI(
     title="Embeddings Search API",
     description="API to search for embeddings in a pgvector database.",
@@ -38,20 +39,20 @@ app = FastAPI(
 )
 
 
-# Search embeddings endpoint
 @app.post("/v1/search_embeddings", response_model=SearchResponse)
 def search_embeddings(request: SearchRequest):
+    """
+    Search for code fragments using a hybrid keyword and vector search approach.
+    """
     query_text = request.query_text
-
-    # Create a new database session
     session = get_session()
 
     try:
-        query_vector = vectorize_query(query_text)    
+        query_vector = vectorize_query(query_text)
         results = hybrid_search(session, query_text, query_vector)
 
         return {"results": results}
     finally:
         session.close()
 
-# Run the app with: uvicorn filename:app --reload
+# Run the app with: make run-api

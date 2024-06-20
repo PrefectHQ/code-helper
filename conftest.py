@@ -1,4 +1,3 @@
-from prefect import flow
 import pytest
 from prefect.testing.utilities import prefect_test_harness
 

@@ -32,29 +32,6 @@ def get_embedding_model():
     return _model
 
 
-# NOTE: Disabled because codetrans summary results of smaller code fragments were low
-#       quality in testing.
-# def get_summarization_pipeline():
-#     with code_trans_lock:
-#         global _summarization_pipeline
-#         if _summarization_pipeline is None:
-#             from transformers import AutoTokenizer, AutoModelWithLMHead, SummarizationPipeline
-#
-#             _summarization_pipeline = SummarizationPipeline(
-#                 model=AutoModelWithLMHead.from_pretrained("SEBIS/code_trans_t5_base_source_code_summarization_python"),
-#                 tokenizer=AutoTokenizer.from_pretrained(
-#                     "SEBIS/code_trans_t5_base_source_code_summarization_python", skip_special_tokens=True
-#                 ),
-#                 device=0
-#             )
-#     return _summarization_pipeline
-#
-#
-# def summarize_code(code: str) -> str:
-#     pipeline = get_summarization_pipeline()
-#     return pipeline([code])
-
-
 @task(cache_key_fn=task_input_hash, cache_expiration=timedelta(days=7), tags=["openai"])
 @marvin.fn
 def summarize_code(code: str) -> str:
@@ -212,7 +189,6 @@ def process_file(filepath):
         )
         session.add(document_fragment)
 
-    # Commit the transaction and close the session
     session.commit()
     session.close()
 
@@ -229,20 +205,17 @@ def process_files(code_dirs: list[str]):
         print("At least one directory path must be provided.")
         sys.exit(1)
 
-    # Iterate over files in the directory
     filepaths = []
     for code_dir in code_dirs:
         for root, dirs, files in os.walk(code_dir):
-            # Exclude ignored directories
             dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
             for file in files:
-                if file.endswith(".py") and file != "__init__.py":  # Process only Python files excluding __init__.py
+                if file.endswith(".py") and file != "__init__.py":
                     filepath = os.path.join(root, file)
                     filepaths.append(filepath)
 
     futures = [process_file.submit(filepath) for filepath in filepaths]
 
-    # Run file processing tasks in parallel
     for future in futures:
         future.wait()
 
