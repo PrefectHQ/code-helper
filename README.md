@@ -1,6 +1,8 @@
 # Code Helper Search API
 
-A search API that combines keyword-based and vector-based searches to find relevant code snippets and documents. It uses a PostgreSQL database with full-text search capabilities and vector search via pgvector. The results from both searches are combined using the Reciprocal Rank Fusion (RRF) algorithm to improve relevance.
+A search API that combines keyword-based and vector-based searches to find relevant code snippets and documents. It uses PostgreSQL's native full-text search and adds vector search via pgvector. The results from both searches are combined using the Reciprocal Rank Fusion (RRF) algorithm to improve relevance.
+
+This API is meant for consumption from an LLM library or tool for Retrieval Augmented Search (RAG).
 
 ## Features
 
