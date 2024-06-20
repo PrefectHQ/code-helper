@@ -1,8 +1,7 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from InstructorEmbedding import INSTRUCTOR
-from sqlalchemy import text
-from models import get_session
+from models import get_session, hybrid_search
 from schemas import SearchResponse, SearchRequest
 from logging import getLogger
 
@@ -19,6 +18,16 @@ def get_model():
     if _model is None:
         _model = INSTRUCTOR('hkunlp/instructor-xl')
     return _model
+
+
+def vectorize_query(query_text: str):
+    # Vectorize the query text using the Instructor model
+    model = get_model()
+
+    # Test using the same instruction we used for embedding code
+    # instruction = "Represent the code snippet:"
+    instruction = "Represent the search query:"
+    return model.encode([instruction, query_text])[0].tolist()
 
 
 # Create the FastAPI app
@@ -38,62 +47,10 @@ def search_embeddings(request: SearchRequest):
     session = get_session()
 
     try:
-        # Vectorize the query text using the Instructor model
-        model = get_model()
-        instruction = "Represent the search query:"
-        # Test using the same instruction we used for embedding code
-        # instruction = "Represent the code snippet:"
-        query_vector = model.encode([instruction, query_text])[0].tolist()
+        query_vector = vectorize_query(query_text)    
+        results = hybrid_search(session, query_text, query_vector)
 
-        # TODO: keyword search and index, fuse results with vector search
-
-        # Perform document similarity search using pgvector
-        # query_documents = text(
-        #     """
-        #     SELECT id, filepath, vector <-> :query_vector AS score
-        #     FROM documents
-        #     ORDER BY score DESC
-        #     LIMIT 5
-        #     """
-        # )
-        #
-        # logger.debug("Query documents: %s", query_documents)
-        #
-        # # Execute the query for documents
-        # document_results = session.execute(query_documents, {'query_vector': str(query_vector)}).fetchall()
-
-        response = []
-
-        # Perform the similarity search for fragments within the documents
-        query_fragments = text(
-            """
-            SELECT document_fragments.vector, documents.id as document_id, document_fragments.meta as meta, documents.filename as filename, documents.filepath as filepath, document_fragments.fragment_content as fragment_content, document_fragments.vector <-> :query_vector as score
-            FROM document_fragments
-            LEFT JOIN documents ON documents.id = document_fragments.document_id
-            ORDER BY document_fragments.vector
-            LIMIT 10
-            """
-        )
-
-        # Execute the query for fragments
-        fragment_results = session.execute(
-            query_fragments,
-            {'query_vector': str(query_vector)}
-        ).fetchall()
-
-        for frag_row in fragment_results:
-            response.append(
-                {
-                    "document_id": str(frag_row.document_id),
-                    "score": frag_row.score,
-                    "filename": frag_row.filename,
-                    "filepath": frag_row.filepath,
-                    "fragment_content": frag_row.fragment_content,
-                    "metadata": frag_row.meta
-                }
-            )
-
-        return {"results": response}
+        return {"results": results}
     finally:
         session.close()
 
