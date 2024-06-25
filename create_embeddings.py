@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 from datetime import datetime, timedelta
+from logging import getLogger
 from threading import Lock
 from dotenv import load_dotenv
 
@@ -9,18 +11,22 @@ from prefect import flow, task
 from prefect.tasks import task_input_hash
 from prefect.utilities.annotations import quote
 
-from code_fragment_extractor import extract_code_fragments_from_file_content
+from code_fragment_extractor import (
+    extract_code_fragments_from_file_content,
+    extract_imports_from_file_content,
+)
 from models import get_session, Document, DocumentFragment
 
 load_dotenv()
 
-IGNORED_PATHS = ['.git', 'env', 'venv', '__pycache__']
+IGNORED_PATHS = [".git", "env", "venv", "__pycache__"]
+
+logger = getLogger(__name__)
 
 instructor_lock = Lock()
 _model = None
-_summarization_pipeline = None
 
-marvin.settings.openai.chat.completions.model = 'gpt-3.5-turbo'
+marvin.settings.openai.chat.completions.model = "gpt-3.5-turbo"
 
 
 def get_embedding_model():
@@ -28,7 +34,8 @@ def get_embedding_model():
         global _model
         if _model is None:
             from InstructorEmbedding import INSTRUCTOR
-            _model = INSTRUCTOR('hkunlp/instructor-xl')
+
+            _model = INSTRUCTOR("hkunlp/instructor-xl")
     return _model
 
 
@@ -115,7 +122,12 @@ def extract_metadata(code: str) -> str:
     """
 
 
-@task(cache_key_fn=task_input_hash, cache_expiration=timedelta(days=7), tags=["model"], refresh_cache=True)
+@task(
+    cache_key_fn=task_input_hash,
+    cache_expiration=timedelta(days=7),
+    tags=["model"],
+    refresh_cache=True,
+)
 def embed_text_with_instructor(text):
     instruction = "Represent the code snippet:"
     model = get_embedding_model()
@@ -125,10 +137,12 @@ def embed_text_with_instructor(text):
 
 @task(cache_key_fn=task_input_hash, cache_expiration=timedelta(days=7))
 def clean_text(text):
-    return text.replace('\x00', '')
+    return text.replace("\x00", "")
 
 
-@task(cache_key_fn=task_input_hash, cache_expiration=timedelta(days=7), refresh_cache=True)
+@task(
+    cache_key_fn=task_input_hash, cache_expiration=timedelta(days=7), refresh_cache=True
+)
 def process_file(filepath):
     session = get_session()
 
@@ -150,21 +164,32 @@ def process_file(filepath):
     # 2. Create embeddings for each code fragment.
     fragments = extract_code_fragments_from_file_content(cleaned_content)
     fragment_vectors = []
-    vector_futures = [embed_text_with_instructor.submit(quote(frag)) for frag in fragments]
+    vector_futures = [
+        embed_text_with_instructor.submit(quote(frag)) for frag in fragments
+    ]
     for future in vector_futures:
         future.wait()
         fragment_vectors.append(future.result())
 
     updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
-    file_metadata = extract_metadata(quote(cleaned_content))
+    try:
+        file_metadata = json.loads(extract_metadata(quote(cleaned_content)))
+    except (ValueError, json.JSONDecodeError):
+        file_metadata = {}
+
+    file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)
 
     fragment_metadata = []
-    fragment_metadata_futures = [extract_metadata.submit(quote(frag)) for frag in fragments]
+    fragment_metadata_futures = [
+        extract_metadata.submit(quote(frag)) for frag in fragments
+    ]
     for future in fragment_metadata_futures:
         future.wait()
         fragment_metadata.append(future.result())
 
-    session.query(DocumentFragment).filter(DocumentFragment.document.has(filepath=filepath)).delete()
+    session.query(DocumentFragment).filter(
+        DocumentFragment.document.has(filepath=filepath)
+    ).delete()
     session.query(Document).filter_by(filepath=filepath).delete()
 
     document = Document(
@@ -174,18 +199,20 @@ def process_file(filepath):
         vector=file_vector,
         summary=file_summary,
         meta=file_metadata,
-        updated_at=updated_at
+        updated_at=updated_at,
     )
     session.add(document)
     session.flush()  # Flush to get the ID of the document record
 
-    for fragment, vector, metadata in zip(fragments, fragment_vectors, fragment_metadata):
+    for fragment, vector, metadata in zip(
+        fragments, fragment_vectors, fragment_metadata
+    ):
         document_fragment = DocumentFragment(
             document_id=document.id,
             fragment_content=fragment,
             vector=vector,
             updated_at=updated_at,
-            meta=metadata
+            meta=metadata,
         )
         session.add(document_fragment)
 

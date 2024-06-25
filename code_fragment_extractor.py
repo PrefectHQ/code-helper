@@ -1,11 +1,14 @@
 import ast
-import sys
+from typing import Type
 
 
-class CodeExtractor(ast.NodeVisitor):
+class FragmentExtractor(ast.NodeVisitor):
     def __init__(self):
         self.fragments = []
+        super().__init__()
 
+
+class CodeExtractor(FragmentExtractor):
     def visit_FunctionDef(self, node):
         if not isinstance(node.parent, ast.ClassDef):
             self.fragments.append(node)
@@ -21,7 +24,19 @@ class CodeExtractor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def extract_code_fragments_from_file_content(file_content: str):
+class ImportExtractor(FragmentExtractor):
+    def visit_Import(self, node):
+        self.fragments.append(node)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        self.fragments.append(node)
+        self.generic_visit(node)
+
+
+def _extract_from_file_content(
+    file_content: str, extractor_cls: Type[FragmentExtractor]
+):
     tree = ast.parse(file_content)
 
     # Set parent references for nodes
@@ -29,8 +44,7 @@ def extract_code_fragments_from_file_content(file_content: str):
         for child in ast.iter_child_nodes(node):
             child.parent = node
 
-    # Extract code fragments
-    extractor = CodeExtractor()
+    extractor = extractor_cls()
     extractor.visit(tree)
 
     code_fragments = []
@@ -42,16 +56,19 @@ def extract_code_fragments_from_file_content(file_content: str):
     return code_fragments
 
 
+def extract_imports_from_file_content(file_content: str):
+    return _extract_from_file_content(file_content, ImportExtractor)
+
+
+def extract_code_fragments_from_file_content(file_content: str):
+    return _extract_from_file_content(file_content, CodeExtractor)
+
+
 def extract_code_fragments_from_file(filepath):
-    with open(filepath, 'r') as file:
+    with open(filepath, "r") as file:
         file_content = file.read()
 
-    return extract_code_fragments_from_file_content(file_content)
-
-
-if __name__ == "__main__":
-    filepath = sys.argv[1]
-    code_fragments = extract_code_fragments_from_file(filepath)
-
-    for i, fragment_code in enumerate(code_fragments):
-        print(f"Fragment {i + 1}:\n{fragment_code}\n")
+    return {
+        "code": extract_code_fragments_from_file_content(file_content),
+        "imports": extract_imports_from_file_content(file_content),
+    }

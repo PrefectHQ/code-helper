@@ -2,7 +2,6 @@ import re
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from InstructorEmbedding import INSTRUCTOR
-from numpy import extract
 from models import get_session, hybrid_search
 from schemas import SearchResponse, SearchRequest
 from logging import getLogger
@@ -18,7 +17,7 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        _model = INSTRUCTOR('hkunlp/instructor-xl')
+        _model = INSTRUCTOR("hkunlp/instructor-xl")
     return _model
 
 
@@ -37,7 +36,7 @@ def vectorize_query(query_text: str):
 app = FastAPI(
     title="Embeddings Search API",
     description="API to search for embeddings in a pgvector database.",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 
@@ -58,10 +57,11 @@ def search_embeddings(request: SearchRequest):
 
     try:
         query_vector = vectorize_query(query_text)
-        results = hybrid_search(session, query_text, query_vector, filenames)
+        results = hybrid_search(session, query_text, query_vector, filenames, limit=10)
 
-        return {"results": results}
+        return {"results": results, "count": len(results)}
     finally:
         session.close()
+
 
 # Run the app with: make run-api

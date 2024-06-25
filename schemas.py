@@ -12,8 +12,9 @@ class SearchResult(BaseModel):
     filepath: str
     fragment_content: str
     metadata: str
+    imports: list[str]
 
 
 class SearchResponse(BaseModel):
     results: list[SearchResult]
-
+    count: int

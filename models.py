@@ -11,6 +11,8 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
     Index,
+    Computed,
+    event,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -31,7 +33,15 @@ class Document(Base):
     filename = Column(String, nullable=False)
     filepath = Column(String, unique=True, nullable=False)
     file_content = Column(Text, nullable=False)
-    tsv_content = Column(TSVECTOR, nullable=True)  # Combined TSVECTOR column
+    tsv_content = Column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(filename, '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(summary, '')), 'B') || "
+            "setweight(to_tsvector('english', coalesce(file_content, '')), 'C')"
+        ),
+        nullable=True,
+    )
     vector = Column(Vector(768), nullable=False)
     summary = Column(Text, nullable=True)
     meta = Column(JSON, nullable=True)
@@ -77,18 +87,46 @@ def get_session():
     return SessionLocal()
 
 
+@event.listens_for(DocumentFragment, "before_insert")
+@event.listens_for(DocumentFragment, "before_update")
+def update_document_fragment_tsvector(mapper, connection, target):
+    """
+    An event listener that automatically updates TSVECTOR columns
+    """
+    connection.execute(
+        text(
+            """
+            UPDATE document_fragments
+            SET fragment_content_tsv = to_tsvector('english', fragment_content)
+            WHERE id = :id
+            """
+        ),
+        {"id": target.id},
+    )
+    connection.execute(
+        text(
+            """
+            UPDATE document_fragments
+            SET summary_tsv = to_tsvector('english', summary)
+            WHERE id = :id
+            """
+        ),
+        {"id": target.id},
+    )
+
+
 def keyword_search_documents(session: Session, query: str, limit: int = 10):
     query_or = "|".join(query.split())
-    search_query = text(
-        """
-        SELECT * FROM documents
-        WHERE tsv_content @@ to_tsquery(:query)
-        ORDER BY ts_rank(tsv_content, to_tsquery(:query)) DESC
-        LIMIT :limit
-        """
-    )
     results = session.execute(
-        search_query, {"query": query_or, "limit": limit}
+        text(
+            """
+            SELECT * FROM documents
+            WHERE tsv_content @@ to_tsquery(:query)
+            ORDER BY ts_rank(tsv_content, to_tsquery(:query)) DESC
+            LIMIT :limit
+            """
+        ),
+        {"query": query_or, "limit": limit},
     ).fetchall()
     return results
 
@@ -107,20 +145,27 @@ def keyword_search_document_fragments(
 
     query = (
         """
-        SELECT document_fragments.id, documents.id as document_id, document_fragments.fragment_content, document_fragments.summary, documents.filename, documents.filepath, document_fragments.meta
+        SELECT document_fragments.id,
+               documents.id as document_id,
+               documents.filename,
+               documents.filepath,
+               documents.meta as document_meta,
+               document_fragments.fragment_content,
+               document_fragments.summary,
+               document_fragments.meta
         FROM document_fragments
-        LEFT JOIN documents ON documents.id = document_fragments.document_id
-        WHERE document_fragments.document_id = ANY(:document_ids)          
-         AND (
-          fragment_content_tsv @@ to_tsquery(:query)
-          OR document_fragments.summary_tsv @@ to_tsquery(:query)
-          )
-    """
+                 LEFT JOIN documents ON documents.id = document_fragments.document_id
+        WHERE document_fragments.document_id = ANY (:document_ids)
+          AND (
+            fragment_content_tsv @@ to_tsquery(:query)
+                OR document_fragments.summary_tsv @@ to_tsquery(:query)
+            )
+            """
         + ("AND filename = ANY(:filenames)" if filenames else "")
         + """
-        ORDER BY ts_rank(fragment_content_tsv, to_tsquery(:query)) DESC
-        LIMIT :limit
-    """
+            ORDER BY ts_rank(fragment_content_tsv, to_tsquery(:query)) DESC
+            LIMIT :limit
+        """
     )
 
     results = session.execute(text(query), opts).fetchall()
@@ -159,10 +204,18 @@ def vector_search_document_fragments(
 
     query = (
         """
-        SELECT document_fragments.id, documents.id as document_id, document_fragments.fragment_content, document_fragments.summary, documents.filename, documents.filepath, document_fragments.meta, document_fragments.vector <-> :query_vector as score
+        SELECT document_fragments.id,
+               documents.id as document_id,
+               documents.filename,
+               documents.filepath,              
+               documents.meta as document_meta,
+               document_fragments.fragment_content,
+               document_fragments.summary,
+               document_fragments.meta,
+               document_fragments.vector <-> :query_vector as score
         FROM document_fragments
-        LEFT JOIN documents ON documents.id = document_fragments.document_id
-        WHERE document_fragments.document_id = ANY(:document_ids)
+                 LEFT JOIN documents ON documents.id = document_fragments.document_id
+        WHERE document_fragments.document_id = ANY (:document_ids)
     """
         + ("AND filename = ANY(:filenames)" if filenames else "")
         + """
@@ -199,23 +252,20 @@ def hybrid_search(
     query_text: str,
     query_vector: list[float],
     filenames: Optional[List[str]] = None,
+    limit: int = 20,
 ):
     documents = keyword_search_documents(session, query_text)
     document_ids = [d.id for d in documents]
 
     vector_fragment_results = vector_search_document_fragments(
-        session, query_vector, document_ids, filenames=filenames
+        session, query_vector, document_ids, filenames=filenames, limit=limit
     )
     keyword_fragment_results = keyword_search_document_fragments(
-        session, query_text, document_ids, filenames=filenames
+        session, query_text, document_ids, filenames=filenames, limit=limit
     )
     combined_results = reciprocal_rank_fusion(
         vector_fragment_results, keyword_fragment_results
     )
-
-    import ipdb
-
-    ipdb.set_trace()
 
     fragments_by_id = {
         frag.id: frag for frag in vector_fragment_results + keyword_fragment_results
@@ -229,6 +279,8 @@ def hybrid_search(
         if frag_id not in seen_fragments:
             seen_fragments.add(frag_id)
             fragment = fragments_by_id[frag_id]
+            imports = fragment.document_meta.get("imports", [])
+
             response.append(
                 {
                     "document_id": str(fragment.document_id),
@@ -237,7 +289,8 @@ def hybrid_search(
                     "filepath": fragment.filepath,
                     "fragment_content": fragment.fragment_content,
                     "metadata": fragment.meta,
+                    "imports": imports,
                 }
             )
 
-    return response
+    return response[:limit]

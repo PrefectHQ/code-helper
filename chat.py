@@ -1,7 +1,6 @@
 from logging import getLogger
 import sys
-from typing import Optional, Any
-from pydantic import Field
+from typing import Optional
 
 import requests
 from marvin.beta import Assistant
@@ -122,8 +121,6 @@ class CodeAssistant(Assistant):
         )
         result = await run.run_async()
         return result
-
-
 
 
 code_helper = CodeAssistant(
