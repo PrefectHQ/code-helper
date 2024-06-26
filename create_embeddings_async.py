@@ -176,10 +176,6 @@ async def process_file(filepath):
 
         cleaned_content = await clean_text(file_content)
 
-        import ipdb
-
-        ipdb.set_trace()
-
         # Summarize the file as a whole for TF-IDF/keyword search
         file_summary = await summarize_code(cleaned_content)
 
