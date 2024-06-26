@@ -1,24 +1,24 @@
-import concurrent
+import asyncio
+from datetime import datetime, timedelta
 import json
+from logging import getLogger
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-from logging import getLogger
-from threading import Lock
-from dotenv import load_dotenv
 
+import aiofiles
+from dotenv import load_dotenv
 import marvin
-from prefect import task, flow
+from prefect import flow, get_client, task
+
 from prefect.tasks import task_input_hash
-from prefect.transactions import transaction, CommitMode
+from prefect.transactions import CommitMode, transaction
 from prefect.utilities.annotations import quote
 
 from code_fragment_extractor import (
     extract_code_fragments_from_file_content,
     extract_imports_from_file_content,
 )
-from models import get_session, Document, DocumentFragment
+from models import Document, DocumentFragment, get_session
 
 load_dotenv()
 
@@ -26,16 +26,16 @@ IGNORED_PATHS = [".git", "env", "venv", "__pycache__"]
 
 logger = getLogger(__name__)
 
-instructor_lock = Lock()
+instructor_lock = asyncio.Lock()
 _model = None
 
 marvin.settings.openai.chat.completions.model = "gpt-3.5-turbo"
 
 
-def get_embedding_model():
-    with instructor_lock:
-        global _model
-        if _model is None:
+async def get_embedding_model():
+    global _model
+    if _model is None:
+        async with instructor_lock:
             from InstructorEmbedding import INSTRUCTOR
 
             _model = INSTRUCTOR("hkunlp/instructor-xl")
@@ -49,7 +49,7 @@ def get_embedding_model():
     tags=["openai"],
 )
 @marvin.fn
-def summarize_code(code: str) -> str:
+async def summarize_code(code: str) -> str:
     """
     You are an LLM preparing summarizations of code fragments to help in a
     search pipeline. Summaries will help developers use natural language to
@@ -70,7 +70,7 @@ def summarize_code(code: str) -> str:
     tags=["openai"],
 )
 @marvin.fn()
-def extract_metadata(code: str) -> str:
+async def extract_metadata(code: str) -> str:
     """
     You are an LLM preparing metadata extraction for code fragments to help with
     natural language search. Developers will query for help writing code similar
@@ -141,9 +141,9 @@ def extract_metadata(code: str) -> str:
     cache_expiration=timedelta(days=7),
     tags=["model"],
 )
-def embed_text_with_instructor(text):
+async def embed_text_with_instructor(text):
     instruction = "Represent the code snippet:"
-    model = get_embedding_model()
+    model = await get_embedding_model()
     embeddings = model.encode([[instruction, text]])
     return embeddings[0].tolist()
 
@@ -153,7 +153,7 @@ def embed_text_with_instructor(text):
     cache_key_fn=task_input_hash,
     cache_expiration=timedelta(days=7),
 )
-def clean_text(text):
+async def clean_text(text):
     return text.replace("\x00", "")
 
 
@@ -163,51 +163,52 @@ def clean_text(text):
     cache_expiration=timedelta(days=7),
     refresh_cache=True,
 )
-def process_file(filepath):
+async def process_file(filepath):
     with transaction(commit_mode=CommitMode.EAGER):
         session = get_session()
 
-        with open(filepath, "r") as f:
-            try:
-                file_content = f.read()
-            except UnicodeDecodeError:
-                print(f"Error reading file: {filepath}")
-                return
+        try:
+            async with aiofiles.open(filepath, "r") as f:
+                file_content = await f.read()
+        except UnicodeDecodeError:
+            print(f"Error reading file: {filepath}")
+            return
 
-        cleaned_content = clean_text(file_content)
+        cleaned_content = await clean_text(file_content)
+
+        import ipdb
+
+        ipdb.set_trace()
 
         # Summarize the file as a whole for TF-IDF/keyword search
-        file_summary = summarize_code(cleaned_content)
+        file_summary = await summarize_code(cleaned_content)
 
         # 1. Create embeddings for the file as a whole.
-        file_vector = embed_text_with_instructor(quote(cleaned_content))
+        file_vector = await embed_text_with_instructor(quote(cleaned_content))
 
         # 2. Create embeddings for each code fragment.
         fragments = extract_code_fragments_from_file_content(cleaned_content)
-        fragment_vectors = []
-        with ThreadPoolExecutor() as executor:
-            vector_futures = [
-                executor.submit(embed_text_with_instructor, quote(frag))
+
+        async with asyncio.TaskGroup() as tg:
+            fragment_vectors_tasks = [
+                tg.create_task(embed_text_with_instructor(quote(frag)))
                 for frag in fragments
             ]
-            for future in concurrent.futures.as_completed(vector_futures):
-                fragment_vectors.append(future.result())
+        fragment_vectors = await asyncio.gather(*fragment_vectors_tasks)
 
         updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
         try:
-            file_metadata = json.loads(extract_metadata(quote(cleaned_content)))
+            file_metadata = json.loads(await extract_metadata(quote(cleaned_content)))
         except (ValueError, json.JSONDecodeError):
             file_metadata = {}
 
         file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)
 
-        fragment_metadata = []
-        with ThreadPoolExecutor() as executor:
-            fragment_metadata_futures = [
-                executor.submit(extract_metadata, quote(frag)) for frag in fragments
+        async with asyncio.TaskGroup() as tg:
+            fragment_metadata_tasks = [
+                tg.create_task(extract_metadata(quote(frag))) for frag in fragments
             ]
-            for future in concurrent.futures.as_completed(fragment_metadata_futures):
-                fragment_metadata.append(future.result())
+        fragment_metadata = await asyncio.gather(*fragment_metadata_tasks)
 
         session.query(DocumentFragment).filter(
             DocumentFragment.document.has(filepath=filepath)
@@ -229,21 +230,14 @@ def process_file(filepath):
         for fragment, vector, metadata in zip(
             fragments, fragment_vectors, fragment_metadata
         ):
-            try:
-                document_fragment = DocumentFragment(
-                    document_id=document.id,
-                    fragment_content=fragment,
-                    vector=vector,
-                    updated_at=updated_at,
-                    meta=metadata,
-                )
-                session.add(document_fragment)
-            except Exception as e:
-                print(fragment, vector, updated_at, metadata)
-                import ipdb
-
-                ipdb.set_trace()
-                print(e)
+            document_fragment = DocumentFragment(
+                document_id=document.id,
+                fragment_content=fragment,
+                vector=vector,
+                updated_at=updated_at,
+                meta=metadata,
+            )
+            session.add(document_fragment)
 
         session.commit()
         session.close()
@@ -251,8 +245,18 @@ def process_file(filepath):
         print(f"Processed file: {filepath}")
 
 
+async def reset_concurrency_limits():
+    """
+    This is a hack because concurrency limits aren't releasing when tasks
+    crash/fail.
+    """
+    async with get_client() as client:
+        await client.reset_concurrency_limit_by_tag("openai")
+        await client.reset_concurrency_limit_by_tag("model")
+
+
 @flow(persist_result=True)
-def process_files(code_dirs: list[str]):
+async def process_files(code_dirs: list[str]):
     """
     Process all Python files in the given directories and insert/update the
     embeddings in the database.
@@ -261,35 +265,35 @@ def process_files(code_dirs: list[str]):
         print("At least one directory or file path must be provided.")
         sys.exit(1)
 
-    futures = []
+    await reset_concurrency_limits()
 
-    for code_dir in code_dirs:
-        if not os.path.exists(code_dir):
-            print(f"Path does not exist: {code_dir}")
-            sys.exit(1)
+    tasks = []
+    async with asyncio.TaskGroup() as tg:
+        for code_dir in code_dirs:
+            if not os.path.exists(code_dir):
+                print(f"Path does not exist: {code_dir}")
+                sys.exit(1)
 
-        if os.path.isfile(code_dir):
-            futures.append(process_file.submit(code_dir))
-        elif os.path.isdir(code_dir):
-            filepaths = []
-            for root, dirs, files in os.walk(code_dir):
-                dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
-                for file in files:
-                    if file.endswith(".py") and file != "__init__.py":
-                        filepath = os.path.join(root, file)
-                        filepaths.append(filepath)
+            if os.path.isfile(code_dir):
+                tasks.append(tg.create_task(process_file(code_dir)))
+            elif os.path.isdir(code_dir):
+                filepaths = []
+                for root, dirs, files in os.walk(code_dir):
+                    dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
+                    for file in files:
+                        if file.endswith(".py") and file != "__init__.py":
+                            filepath = os.path.join(root, file)
+                            filepaths.append(filepath)
 
-                for filepath in filepaths:
-                    futures.append(process_file.submit(filepath))
-        else:
-            print(f"Invalid path: {code_dir}")
-            sys.exit(1)
+                    for filepath in filepaths:
+                        tasks.append(tg.create_task(process_file(filepath)))
+            else:
+                print(f"Invalid path: {code_dir}")
+                sys.exit(1)
 
-    for future in futures:
-        future.wait()
-
+    await asyncio.gather(*tasks)
     print("Code files processed and inserted/updated successfully.")
 
 
 if __name__ == "__main__":
-    process_files(sys.argv[1:])
+    asyncio.run(process_files(sys.argv[1:]))

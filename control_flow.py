@@ -72,19 +72,16 @@ def write_code(query: str) -> str:
         tools=[query_knowledge],
         agents=[code_helper],
         context={"query": query},
-        result_type=str,
     )
     first_draft = cf.Task(
         "Use technical context and query to write a first draft of the requested code",
         agents=[code_helper],
         context={"query": query, "technical_context": get_context},
-        result_type=str,
     )
     write_tests = cf.Task(
         "Write tests for the code",
         agents=[code_helper],
         context={"query": query, "first_draft": first_draft},
-        result_type=str,
     )
     review_code = cf.Task(
         "Review the code and provide feedback",
@@ -95,7 +92,6 @@ def write_code(query: str) -> str:
             "first_draft": first_draft,
             "tests": write_tests,
         },
-        result_type=str,
     )
     final_draft = cf.Task(
         "Incorporate feedback and write the final draft of the code with tests",
