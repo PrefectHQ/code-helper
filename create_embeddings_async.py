@@ -190,7 +190,7 @@ async def process_file(filepath):
                 tg.create_task(embed_text_with_instructor(quote(frag)))
                 for frag in fragments
             ]
-        fragment_vectors = await asyncio.gather(*fragment_vectors_tasks)
+        fragment_vectors = [f.result() for f in fragment_vectors_tasks]
 
         updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
         try:
@@ -204,7 +204,7 @@ async def process_file(filepath):
             fragment_metadata_tasks = [
                 tg.create_task(extract_metadata(quote(frag))) for frag in fragments
             ]
-        fragment_metadata = await asyncio.gather(*fragment_metadata_tasks)
+        fragment_metadata = [f.result() for f in fragment_metadata_tasks]
 
         session.query(DocumentFragment).filter(
             DocumentFragment.document.has(filepath=filepath)
@@ -287,7 +287,6 @@ async def process_files(code_dirs: list[str]):
                 print(f"Invalid path: {code_dir}")
                 sys.exit(1)
 
-    await asyncio.gather(*tasks)
     print("Code files processed and inserted/updated successfully.")
 
 
