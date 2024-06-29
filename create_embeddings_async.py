@@ -4,11 +4,13 @@ import json
 from logging import getLogger
 import os
 import sys
+from typing import Any
 
 import aiofiles
 from dotenv import load_dotenv
 import marvin
 from prefect import flow, get_client, task
+from prefect.client.schemas.actions import GlobalConcurrencyLimitUpdate
 
 from prefect.tasks import task_input_hash
 from prefect.transactions import CommitMode, transaction
@@ -51,15 +53,15 @@ async def get_embedding_model():
 @marvin.fn
 async def summarize_code(code: str) -> str:
     """
-    You are an LLM preparing summarizations of code fragments to help in a
-    search pipeline. Summaries will help developers use natural language to
-    describe what they want. Developers may use general technical terms like
-    "orm" or "model" or the specific names of functions and classes in the
-    codebase. Or they may also ask questions about the code, either by naming
-    classes or functions or by providing example code. You need to summarize the
-    code by referring to what it does specifically and then inferring major
-    components it relates to, such as CLI commands, API endpoints, data models,
-    or validation schemas.
+    You are preparing summarizations of code fragments to help in a search
+    pipeline. Summaries will help developers use natural language to describe
+    what they want. Developers may use general technical terms like "orm" or
+    "model" or the specific names of functions and classes in the codebase. Or
+    they may also ask questions about the code, either by naming classes or
+    functions or by providing example code. You need to summarize the code by
+    referring to what it does specifically and then inferring major components
+    it relates to, such as CLI commands, API endpoints, data models, or
+    validation schemas.
     """
 
 
@@ -141,7 +143,7 @@ async def extract_metadata(code: str) -> str:
     cache_expiration=timedelta(days=7),
     tags=["model"],
 )
-async def embed_text_with_instructor(text):
+async def embed_text_with_instructor(text: str):
     instruction = "Represent the code snippet:"
     model = await get_embedding_model()
     embeddings = model.encode([[instruction, text]])
@@ -157,11 +159,61 @@ async def clean_text(text):
     return text.replace("\x00", "")
 
 
+async def with_retries(llm_task: Any, text: str) -> Any:
+    """
+    Sent text to an LLM task and use various attempts to retry if it fails.
+
+    TODO: Should probably just be a decorator.
+    TODO: One finalizer.
+    """
+    original_model = marvin.settings.openai.chat.completions.model
+
+    # Exceptions from OpenAI are always openai.BadResponseError, but for some
+    # reason, trying to catch that doesn't work reliably. It's possible that
+    # multiple copies of the exception class are in memory due to lazy loading.
+    try:
+        return await llm_task(text)
+    except:
+        logger.exception(f"Error running {task}. Retrying with gpt-4o.")
+    finally:
+        marvin.settings.openai.chat.completions.model = original_model
+
+    try:
+        marvin.settings.openai.chat.completions.model = "gpt-4o"
+        await llm_task(text)
+    except:
+        logger.exception(
+            f"Error running {task} (attempt #2). Retrying with less context."
+        )
+    finally:
+        marvin.settings.openai.chat.completions.model = original_model
+
+    try:
+        marvin.settings.openai.chat.completions.model = "gpt-4o"
+        return await llm_task(text[: len(text) // 2])
+    except:
+        logger.exception(
+            f"Error running {task} (attempt #3). Retrying with less context."
+        )
+    finally:
+        marvin.settings.openai.chat.completions.model = original_model
+
+    try:
+        marvin.settings.openai.chat.completions.model = "gpt-4o"
+        return await llm_task(text[: len(text) // 4])
+    except:
+        logger.exception(f"Error running {task} (attempt #4). Giving up.")
+        return ""
+    finally:
+        marvin.settings.openai.chat.completions.model = original_model
+
+
 @task(
     persist_result=True,
     cache_key_fn=task_input_hash,
     cache_expiration=timedelta(days=7),
     refresh_cache=True,
+    tags=["file"],
 )
 async def process_file(filepath):
     with transaction(commit_mode=CommitMode.EAGER):
@@ -177,7 +229,7 @@ async def process_file(filepath):
         cleaned_content = await clean_text(file_content)
 
         # Summarize the file as a whole for TF-IDF/keyword search
-        file_summary = await summarize_code(cleaned_content)
+        file_summary = await with_retries(summarize_code, quote(cleaned_content))
 
         # 1. Create embeddings for the file as a whole.
         file_vector = await embed_text_with_instructor(quote(cleaned_content))
@@ -194,7 +246,9 @@ async def process_file(filepath):
 
         updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
         try:
-            file_metadata = json.loads(await extract_metadata(quote(cleaned_content)))
+            file_metadata = json.loads(
+                await with_retries(extract_metadata, quote(cleaned_content))
+            )
         except (ValueError, json.JSONDecodeError):
             file_metadata = {}
 
@@ -202,7 +256,8 @@ async def process_file(filepath):
 
         async with asyncio.TaskGroup() as tg:
             fragment_metadata_tasks = [
-                tg.create_task(extract_metadata(quote(frag))) for frag in fragments
+                tg.create_task(with_retries(extract_metadata, quote(frag)))
+                for frag in fragments
             ]
         fragment_metadata = [f.result() for f in fragment_metadata_tasks]
 
@@ -247,8 +302,15 @@ async def reset_concurrency_limits():
     crash/fail.
     """
     async with get_client() as client:
-        await client.reset_concurrency_limit_by_tag("openai")
-        await client.reset_concurrency_limit_by_tag("model")
+        await client.update_global_concurrency_limit(
+            "openai", GlobalConcurrencyLimitUpdate(active_slots=0)
+        )
+        await client.update_global_concurrency_limit(
+            "model", GlobalConcurrencyLimitUpdate(active_slots=0)
+        )
+        await client.update_global_concurrency_limit(
+            "file", GlobalConcurrencyLimitUpdate(active_slots=0)
+        )
 
 
 @flow(persist_result=True)
@@ -263,29 +325,27 @@ async def process_files(code_dirs: list[str]):
 
     await reset_concurrency_limits()
 
-    tasks = []
-    async with asyncio.TaskGroup() as tg:
-        for code_dir in code_dirs:
-            if not os.path.exists(code_dir):
-                print(f"Path does not exist: {code_dir}")
-                sys.exit(1)
+    for code_dir in code_dirs:
+        if not os.path.exists(code_dir):
+            print(f"Path does not exist: {code_dir}")
+            sys.exit(1)
 
-            if os.path.isfile(code_dir):
-                tasks.append(tg.create_task(process_file(code_dir)))
-            elif os.path.isdir(code_dir):
-                filepaths = []
-                for root, dirs, files in os.walk(code_dir):
-                    dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
-                    for file in files:
-                        if file.endswith(".py") and file != "__init__.py":
-                            filepath = os.path.join(root, file)
-                            filepaths.append(filepath)
+        if os.path.isfile(code_dir):
+            await process_file(code_dir)
+        elif os.path.isdir(code_dir):
+            filepaths = []
+            for root, dirs, files in os.walk(code_dir):
+                dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
+                for file in files:
+                    if file.endswith(".py") and file != "__init__.py":
+                        filepath = os.path.join(root, file)
+                        filepaths.append(filepath)
 
-                    for filepath in filepaths:
-                        tasks.append(tg.create_task(process_file(filepath)))
-            else:
-                print(f"Invalid path: {code_dir}")
-                sys.exit(1)
+                for filepath in filepaths:
+                    await process_file(filepath)
+        else:
+            print(f"Invalid path: {code_dir}")
+            sys.exit(1)
 
     print("Code files processed and inserted/updated successfully.")
 

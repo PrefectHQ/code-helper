@@ -1,9 +1,20 @@
+import sys
+from typing import Optional
+
+import marvin
 import requests
+from controlflow import flow
+from prefect import pause_flow_run
+from prefect.context import EngineContext
+from prefect.input import RunInput
+from prefect.utilities.urls import url_for
 
 from schemas import SearchResponse
+from dotenv import load_dotenv
 
 import controlflow as cf
 
+load_dotenv()
 
 INSTRUCTIONS = """
 You are Code Helper. You are a coding assistant, tailored to work within a
@@ -65,27 +76,27 @@ def query_knowledge(query_text: str) -> SearchResponse:
     return SearchResponse(**response.json())
 
 
-@cf.flow
-def write_code(query: str) -> str:
+class Interaction(RunInput):
+    query: str
+
+
+@cf.flow(agents=[code_helper])
+def write_code(query: Optional[str] = None) -> str:
     get_context = cf.Task(
         "Get technical context related to query",
         tools=[query_knowledge],
-        agents=[code_helper],
         context={"query": query},
     )
     first_draft = cf.Task(
         "Use technical context and query to write a first draft of the requested code",
-        agents=[code_helper],
         context={"query": query, "technical_context": get_context},
     )
     write_tests = cf.Task(
         "Write tests for the code",
-        agents=[code_helper],
         context={"query": query, "first_draft": first_draft},
     )
     review_code = cf.Task(
         "Review the code and provide feedback",
-        agents=[code_helper],
         context={
             "query": query,
             "technical_context": get_context,
@@ -94,8 +105,8 @@ def write_code(query: str) -> str:
         },
     )
     final_draft = cf.Task(
-        "Incorporate feedback and write the final draft of the code with tests",
-        agents=[code_helper],
+        "Incorporate feedback and write the final draft of the code with tests. "
+        "Wrap any code in a markdown code block.",
         context={
             "query": query,
             "technical_context": get_context,
@@ -105,5 +116,153 @@ def write_code(query: str) -> str:
         },
         result_type=str,
     )
-
     return final_draft  # type: ignore
+
+
+@cf.flow(agents=[code_helper])
+def review_code(query: Optional[str] = None) -> str:
+    get_context = cf.Task(
+        "Get technical context related to query",
+        tools=[query_knowledge],
+        context={"query": query},
+        result_type=str,
+    )
+    review_code = cf.Task(
+        "Review the code and provide feedback",
+        context={
+            "query": query,
+            "technical_context": get_context,
+        },
+        result_type=str,
+    )
+    return review_code  # type: ignore
+
+
+@cf.flow(agents=[code_helper])
+def write_tests(query: Optional[str] = None) -> str:
+    get_context = cf.Task(
+        "Get technical context related to query",
+        tools=[query_knowledge],
+        context={"query": query},
+    )
+    write_tests = cf.Task(
+        "Use technical context to write tests for the code",
+        context={"query": query, "technical_context": get_context},
+    )
+    return write_tests  # type: ignore
+
+
+@cf.flow(agents=[code_helper])
+def refactor_code(query: Optional[str] = None) -> str:
+    get_context = cf.Task(
+        "Get technical context related to query",
+        tools=[query_knowledge],
+        context={"query": query},
+    )
+    refactor_code = cf.Task(
+        "Refactor the code",
+        context={"query": query, "technical_context": get_context},
+    )
+    return refactor_code  # type: ignore
+
+
+@cf.flow(agents=[code_helper])
+def answer_question(query: Optional[str] = None) -> str:
+    get_context = cf.Task(
+        "Get technical context related to query",
+        tools=[query_knowledge],
+        context={"query": query},
+    )
+    answer_question = cf.Task(
+        "Answer the question",
+        context={"query": query, "technical_context": get_context},
+    )
+    return answer_question  # type: ignore
+
+
+@cf.flow(agents=[code_helper])
+def answer_unclassifiable_query(query: Optional[str] = None) -> str:
+    get_context = cf.Task(
+        "Get technical context related to query",
+        tools=[query_knowledge],
+        context={"query": query},
+    )
+    try_to_answer_unclassified_query = cf.Task(
+        "Try to answer the unclassifiable query. Mention that you aren't sure "
+        "exactly how to answer the question, but you'll give it your best shot.",
+        context={"query": query, "technical_context": get_context},
+    )
+    return try_to_answer_unclassified_query  # type: ignore
+
+
+class Unset:
+    pass
+
+
+def classify(query: str) -> str:
+    return marvin.classify(
+        query,
+        [
+            "write_code",
+            "write_tests",
+            "refactor_code",
+            "review_code",
+            "answer_question",
+            "unclassifiable",
+        ],
+    )
+
+
+def answer_query(query: str) -> str:
+    workflow = classify(query)
+    if workflow == "write_code":
+        return write_code(query=query)
+    elif workflow == "write_tests":
+        return write_tests(query=query)
+    elif workflow == "refactor_code":
+        return refactor_code(query=query)
+    elif workflow == "review_code":
+        return review_code(query=query)
+    elif workflow == "answer_question":
+        return answer_question(query=query)
+    elif workflow == "unclassifiable":
+        return answer_unclassifiable_query(query=query)
+    else:
+        raise ValueError(f"Unknown workflow: {workflow}")
+
+
+@flow
+def write_code_loop(query: Optional[str] = None) -> str:
+    if query is None:  # Prefect parameter validation can't handle Unset
+        query = Unset
+
+    engine_ctx = EngineContext.get()
+    flow_run_url = url_for(engine_ctx.flow_run)
+
+    try:
+        while True:
+            if query is Unset:
+                response = "How can I help?"
+            elif query is None or query == "q" or query == "quit":
+                return "Goodbye!"
+            else:
+                print("Getting response")
+                response = answer_query(query=query)
+
+            print("Pausing for query. View at: ", flow_run_url)
+            interaction = pause_flow_run(
+                Interaction.with_initial_data(description=response)
+            )
+            query = interaction.query
+    except KeyboardInterrupt:
+        return "Goodbye!"
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python control_flow.py [run|serve]")
+        sys.exit(1)
+    if sys.argv[1] == "run":
+        write_code_loop()
+    elif sys.argv[1] == "serve":
+        write_code_loop.serve()
