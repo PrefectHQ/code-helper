@@ -1,6 +1,6 @@
 import re
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from InstructorEmbedding import INSTRUCTOR
 from models import get_session, hybrid_search
 from schemas import SearchResponse, SearchRequest
@@ -47,21 +47,18 @@ def extract_filenames(query_string: str):
 
 
 @app.post("/v1/search_embeddings", response_model=SearchResponse)
-def search_embeddings(request: SearchRequest):
+async def search_embeddings(request: SearchRequest, session: Depends(get_session)):
     """
     Search for code fragments using a hybrid keyword and vector search approach.
     """
     query_text = request.query_text
-    session = get_session()
     filenames = extract_filenames(query_text)
+    query_vector = vectorize_query(query_text)
 
-    try:
-        query_vector = vectorize_query(query_text)
-        results = hybrid_search(session, query_text, query_vector, filenames, limit=10)
-
-        return {"results": results, "count": len(results)}
-    finally:
-        session.close()
+    results = await hybrid_search(
+        session, query_text, query_vector, filenames, limit=10
+    )
+    return {"results": results, "count": len(results)}
 
 
 # Run the app with: make run-api

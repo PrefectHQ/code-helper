@@ -1,20 +1,17 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
+from functools import wraps
 from logging import getLogger
 import os
 import sys
 from typing import Any
 
 import aiofiles
+import click
 from dotenv import load_dotenv
 import marvin
-from prefect import flow, get_client, task
-from prefect.client.schemas.actions import GlobalConcurrencyLimitUpdate
-
-from prefect.tasks import task_input_hash
-from prefect.transactions import CommitMode, transaction
-from prefect.utilities.annotations import quote
+from sqlalchemy import func, select, delete
 
 from code_fragment_extractor import (
     extract_code_fragments_from_file_content,
@@ -44,12 +41,12 @@ async def get_embedding_model():
     return _model
 
 
-@task(
-    persist_result=True,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=7),
-    tags=["openai"],
-)
+# @task(
+#     persist_result=True,
+#     cache_key_fn=task_input_hash,
+#     cache_expiration=timedelta(days=7),
+#     tags=["openai"],
+# )
 @marvin.fn
 async def summarize_code(code: str) -> str:
     """
@@ -65,12 +62,12 @@ async def summarize_code(code: str) -> str:
     """
 
 
-@task(
-    persist_result=True,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=7),
-    tags=["openai"],
-)
+# @task(
+#     persist_result=True,
+#     cache_key_fn=task_input_hash,
+#     cache_expiration=timedelta(days=7),
+#     tags=["openai"],
+# )
 @marvin.fn()
 async def extract_metadata(code: str) -> str:
     """
@@ -137,12 +134,14 @@ async def extract_metadata(code: str) -> str:
     """
 
 
-@task(
-    persist_result=True,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=7),
-    tags=["model"],
-)
+# @task(
+#     persist_result=True,
+#     cache_key_fn=task_input_hash,
+#     cache_expiration=timedelta(days=7),
+#     tags=["model"],
+# )
+
+
 async def embed_text_with_instructor(text: str):
     instruction = "Represent the code snippet:"
     model = await get_embedding_model()
@@ -150,11 +149,11 @@ async def embed_text_with_instructor(text: str):
     return embeddings[0].tolist()
 
 
-@task(
-    persist_result=True,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=7),
-)
+# @task(
+#     persist_result=True,
+#     cache_key_fn=task_input_hash,
+#     cache_expiration=timedelta(days=7),
+# )
 async def clean_text(text):
     return text.replace("\x00", "")
 
@@ -174,7 +173,7 @@ async def with_retries(llm_task: Any, text: str) -> Any:
     try:
         return await llm_task(text)
     except:
-        logger.exception(f"Error running {task}. Retrying with gpt-4o.")
+        logger.exception(f"Error running {llm_task}. Retrying with gpt-4o.")
     finally:
         marvin.settings.openai.chat.completions.model = original_model
 
@@ -183,7 +182,7 @@ async def with_retries(llm_task: Any, text: str) -> Any:
         await llm_task(text)
     except:
         logger.exception(
-            f"Error running {task} (attempt #2). Retrying with less context."
+            f"Error running {llm_task} (attempt #2). Retrying with less context."
         )
     finally:
         marvin.settings.openai.chat.completions.model = original_model
@@ -193,7 +192,7 @@ async def with_retries(llm_task: Any, text: str) -> Any:
         return await llm_task(text[: len(text) // 2])
     except:
         logger.exception(
-            f"Error running {task} (attempt #3). Retrying with less context."
+            f"Error running {llm_task} (attempt #3). Retrying with less context."
         )
     finally:
         marvin.settings.openai.chat.completions.model = original_model
@@ -202,153 +201,179 @@ async def with_retries(llm_task: Any, text: str) -> Any:
         marvin.settings.openai.chat.completions.model = "gpt-4o"
         return await llm_task(text[: len(text) // 4])
     except:
-        logger.exception(f"Error running {task} (attempt #4). Giving up.")
-        return ""
+        logger.exception(f"Error running {llm_task} (attempt #4). Giving up.")
+        return None
     finally:
         marvin.settings.openai.chat.completions.model = original_model
 
 
-@task(
-    persist_result=True,
-    cache_key_fn=task_input_hash,
-    cache_expiration=timedelta(days=7),
-    refresh_cache=True,
-    tags=["file"],
-)
-async def process_file(filepath):
-    with transaction(commit_mode=CommitMode.EAGER):
-        session = get_session()
+# @task(
+#     persist_result=True,
+#     cache_key_fn=task_input_hash,
+#     cache_expiration=timedelta(days=7),
+#     refresh_cache=True,
+#     tags=["file"],
+# )
+async def process_file(filepath, session, replace_existing=False):
+    # with transaction(commit_mode=CommitMode.EAGER):
+    try:
+        async with aiofiles.open(filepath, "r") as f:
+            file_content = await f.read()
+    except UnicodeDecodeError:
+        print(f"Error reading file: {filepath}")
+        return
 
-        try:
-            async with aiofiles.open(filepath, "r") as f:
-                file_content = await f.read()
-        except UnicodeDecodeError:
-            print(f"Error reading file: {filepath}")
+    stmt = (
+        select(func.count()).select_from(Document).where(Document.filepath == filepath)
+    )
+    result = await session.execute(stmt)
+
+    if result.scalar() > 0:
+        if not replace_existing:
+            print(f"File already exists: {filepath}")
             return
-
-        cleaned_content = await clean_text(file_content)
-
-        # Summarize the file as a whole for TF-IDF/keyword search
-        file_summary = await with_retries(summarize_code, quote(cleaned_content))
-
-        # 1. Create embeddings for the file as a whole.
-        file_vector = await embed_text_with_instructor(quote(cleaned_content))
-
-        # 2. Create embeddings for each code fragment.
-        fragments = extract_code_fragments_from_file_content(cleaned_content)
-
-        async with asyncio.TaskGroup() as tg:
-            fragment_vectors_tasks = [
-                tg.create_task(embed_text_with_instructor(quote(frag)))
-                for frag in fragments
-            ]
-        fragment_vectors = [f.result() for f in fragment_vectors_tasks]
-
-        updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
-        try:
-            file_metadata = json.loads(
-                await with_retries(extract_metadata, quote(cleaned_content))
+        await session.execute(
+            delete(DocumentFragment).where(
+                DocumentFragment.document.has(filepath=filepath)
             )
-        except (ValueError, json.JSONDecodeError):
-            file_metadata = {}
+        )
+        await session.execute(delete(Document).where(Document.filepath == filepath))
 
-        file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)
+    cleaned_content = await clean_text(file_content)
 
-        async with asyncio.TaskGroup() as tg:
-            fragment_metadata_tasks = [
-                tg.create_task(with_retries(extract_metadata, quote(frag)))
-                for frag in fragments
-            ]
-        fragment_metadata = [f.result() for f in fragment_metadata_tasks]
+    # Summarize the file as a whole for TF-IDF/keyword search
+    file_summary = await with_retries(summarize_code, cleaned_content)
 
-        session.query(DocumentFragment).filter(
-            DocumentFragment.document.has(filepath=filepath)
-        ).delete()
-        session.query(Document).filter_by(filepath=filepath).delete()
+    # 1. Create embeddings for the file as a whole.
+    file_vector = await embed_text_with_instructor(cleaned_content)
 
-        document = Document(
-            filename=os.path.basename(filepath),
-            filepath=filepath,
-            file_content=cleaned_content,
-            vector=file_vector,
-            summary=file_summary,
-            meta=file_metadata,
+    # 2. Create embeddings for each code fragment.
+    fragments = extract_code_fragments_from_file_content(cleaned_content)
+
+    async with asyncio.TaskGroup() as tg:
+        fragment_vectors_tasks = [
+            tg.create_task(embed_text_with_instructor(frag)) for frag in fragments
+        ]
+    fragment_vectors = [f.result() for f in fragment_vectors_tasks]
+
+    updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
+    try:
+        file_metadata = json.loads(
+            await with_retries(extract_metadata, cleaned_content)
+        )
+    except (ValueError, json.JSONDecodeError, TypeError) as e:
+        logger.error(f"Error extracting metadata: {e}. Using empty metadata.")
+        file_metadata = {}
+
+    file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)
+
+    async with asyncio.TaskGroup() as tg:
+        fragment_metadata_tasks = [
+            tg.create_task(with_retries(extract_metadata, frag)) for frag in fragments
+        ]
+    fragment_metadata = [f.result() for f in fragment_metadata_tasks]
+
+    document = Document(
+        filename=os.path.basename(filepath),
+        filepath=filepath,
+        file_content=cleaned_content,
+        vector=file_vector,
+        summary=file_summary,
+        meta=file_metadata,
+        updated_at=updated_at,
+    )
+    session.add(document)
+    await session.flush()  # Flush to get the ID of the document record
+
+    for fragment, vector, metadata in zip(
+        fragments, fragment_vectors, fragment_metadata
+    ):
+        document_fragment = DocumentFragment(
+            document_id=document.id,
+            fragment_content=fragment,
+            vector=vector,
             updated_at=updated_at,
+            meta=metadata,
         )
-        session.add(document)
-        session.flush()  # Flush to get the ID of the document record
+        session.add(document_fragment)
 
-        for fragment, vector, metadata in zip(
-            fragments, fragment_vectors, fragment_metadata
-        ):
-            document_fragment = DocumentFragment(
-                document_id=document.id,
-                fragment_content=fragment,
-                vector=vector,
-                updated_at=updated_at,
-                meta=metadata,
-            )
-            session.add(document_fragment)
+    await session.commit()
+    await session.close()
 
-        session.commit()
-        session.close()
+    print(f"Processed file: {filepath}")
 
-        print(f"Processed file: {filepath}")
-
-
-async def reset_concurrency_limits():
-    """
-    This is a hack because concurrency limits aren't releasing when tasks
-    crash/fail.
-    """
-    async with get_client() as client:
-        await client.update_global_concurrency_limit(
-            "openai", GlobalConcurrencyLimitUpdate(active_slots=0)
-        )
-        await client.update_global_concurrency_limit(
-            "model", GlobalConcurrencyLimitUpdate(active_slots=0)
-        )
-        await client.update_global_concurrency_limit(
-            "file", GlobalConcurrencyLimitUpdate(active_slots=0)
-        )
+    # async def reset_concurrency_limits():
+    #     """
+    #     This is a hack because concurrency limits aren't releasing when tasks
+    #     crash/fail.
+    #     """
+    #     async with get_client() as client:
+    #         await client.update_global_concurrency_limit(
+    #             "openai", GlobalConcurrencyLimitUpdate(active_slots=0)
+    #         )
+    #         await client.update_global_concurrency_limit(
+    #             "model", GlobalConcurrencyLimitUpdate(active_slots=0)
+    #         )
+    #         await client.update_global_concurrency_limit(
+    #             "file", GlobalConcurrencyLimitUpdate(active_slots=0)
+    #         )
 
 
-@flow(persist_result=True)
-async def process_files(code_dirs: list[str]):
+def async_command(f):
+    """Wrapper necessary because Click doesn't support async"""
+
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        return asyncio.run(f(*args, **kwargs))
+
+    return wrapper
+
+
+# @flow(persist_result=True)
+@click.command()
+@click.argument("code_dirs", nargs=-1)
+@click.option(
+    "--reindex",
+    is_flag=True,
+    help="Reindex files if they already exist in the database",
+)
+@async_command
+async def process_files(code_dirs: list[str], reindex: bool = False):
     """
     Process all Python files in the given directories and insert/update the
     embeddings in the database.
     """
-    if not code_dirs:
-        print("At least one directory or file path must be provided.")
-        sys.exit(1)
-
-    await reset_concurrency_limits()
-
-    for code_dir in code_dirs:
-        if not os.path.exists(code_dir):
-            print(f"Path does not exist: {code_dir}")
+    async with get_session() as session:
+        if not code_dirs:
+            print("At least one directory or file path must be provided.")
             sys.exit(1)
 
-        if os.path.isfile(code_dir):
-            await process_file(code_dir)
-        elif os.path.isdir(code_dir):
-            filepaths = []
-            for root, dirs, files in os.walk(code_dir):
-                dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
-                for file in files:
-                    if file.endswith(".py") and file != "__init__.py":
-                        filepath = os.path.join(root, file)
-                        filepaths.append(filepath)
+        # await reset_concurrency_limits()
 
-                for filepath in filepaths:
-                    await process_file(filepath)
-        else:
-            print(f"Invalid path: {code_dir}")
-            sys.exit(1)
+        for code_dir in code_dirs:
+            if not os.path.exists(code_dir):
+                print(f"Path does not exist: {code_dir}")
+                sys.exit(1)
 
-    print("Code files processed and inserted/updated successfully.")
+            if os.path.isfile(code_dir):
+                await process_file(code_dir, session, reindex)
+            elif os.path.isdir(code_dir):
+                filepaths = []
+                for root, dirs, files in os.walk(code_dir):
+                    dirs[:] = [d for d in dirs if d not in IGNORED_PATHS]
+                    for file in files:
+                        if file.endswith(".py") and file != "__init__.py":
+                            filepath = os.path.join(root, file)
+                            filepaths.append(filepath)
+
+                    for filepath in filepaths:
+                        await process_file(filepath, session, reindex)
+            else:
+                print(f"Invalid path: {code_dir}")
+                sys.exit(1)
+
+        print("Code files processed and inserted/updated successfully.")
 
 
 if __name__ == "__main__":
-    asyncio.run(process_files(sys.argv[1:]))
+    process_files()

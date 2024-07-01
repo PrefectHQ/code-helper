@@ -10,6 +10,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    command: ["postgres", "-c", "log_min_duration_statement=1000"]
 
 volumes:
   pgdata:

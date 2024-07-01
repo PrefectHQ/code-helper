@@ -1,8 +1,8 @@
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 from sqlalchemy import (
-    create_engine,
     Column,
     Integer,
     String,
@@ -14,6 +14,7 @@ from sqlalchemy import (
     Computed,
     event,
 )
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from pgvector.sqlalchemy import Vector
@@ -21,9 +22,9 @@ from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import text
 
-DATABASE_URL = "postgresql://username:password@localhost:5432/code_helper"
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+DATABASE_URL = "postgresql+asyncpg://username:password@localhost:5432/code_helper"
+engine = create_async_engine(DATABASE_URL, echo=True)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 
 
@@ -83,8 +84,10 @@ Document.fragments = relationship(
 )
 
 
-def get_session():
-    return SessionLocal()
+@asynccontextmanager
+async def get_session() -> AsyncSession:
+    async with SessionLocal() as session:
+        yield session
 
 
 @event.listens_for(DocumentFragment, "before_insert")
@@ -231,7 +234,11 @@ def vector_search_document_fragments(
     ).fetchall()
 
 
-def reciprocal_rank_fusion(vector_results, keyword_results, k=60):
+def reciprocal_rank_fusion(
+    vector_results,
+    keyword_results,
+    k=60,
+) -> list[tuple[Any, float]]:
     rank_dict = defaultdict(float)
 
     # Assign ranks to vector search results
@@ -247,20 +254,22 @@ def reciprocal_rank_fusion(vector_results, keyword_results, k=60):
     return sorted_results
 
 
-def hybrid_search(
+async def hybrid_search(
     session: Session,
     query_text: str,
     query_vector: list[float],
     filenames: Optional[List[str]] = None,
     limit: int = 20,
 ):
-    documents = keyword_search_documents(session, query_text)
-    document_ids = [d.id for d in documents]
+    keyword_documents = await keyword_search_documents(session, query_text)
+    vector_documents = await vector_search_documents(session, query_vector)
+    documents = reciprocal_rank_fusion(vector_documents, keyword_documents)
+    document_ids = [d[0] for d in documents]
 
-    vector_fragment_results = vector_search_document_fragments(
+    vector_fragment_results = await vector_search_document_fragments(
         session, query_vector, document_ids, filenames=filenames, limit=limit
     )
-    keyword_fragment_results = keyword_search_document_fragments(
+    keyword_fragment_results = await keyword_search_document_fragments(
         session, query_text, document_ids, filenames=filenames, limit=limit
     )
     combined_results = reciprocal_rank_fusion(
