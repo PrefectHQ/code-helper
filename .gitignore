@@ -164,3 +164,4 @@ cython_debug/
 .env
 pg_data
 envp3
+.cache
