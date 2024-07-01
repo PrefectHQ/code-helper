@@ -13,18 +13,18 @@ from dotenv import load_dotenv
 import marvin
 from sqlalchemy import func, select, delete
 
-from code_fragment_extractor import (
+from code_helper.code_fragment_extractor import (
     extract_code_fragments_from_file_content,
     extract_imports_from_file_content,
 )
-from models import (
+from code_helper.models import (
     Document,
     DocumentFragment,
     get_session,
     create_document,
     create_document_fragment,
 )
-from file_cache import file_cache
+from code_helper.file_cache import file_cache
 
 load_dotenv()
 
@@ -266,12 +266,14 @@ async def process_file(filepath, session, replace_existing=False):
     fragment_vectors = [f.result() for f in fragment_vectors_tasks]
 
     updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
+    metadata_raw = await with_retries(extract_metadata, cleaned_content)
+
     try:
-        file_metadata = json.loads(
-            await with_retries(extract_metadata, cleaned_content)
-        )
+        file_metadata = json.loads(metadata_raw)
     except (ValueError, json.JSONDecodeError, TypeError) as e:
-        logger.error(f"Error extracting metadata: {e}. Using empty metadata.")
+        logger.error(
+            f"Error extracting metadata: {e}. Raw metadata: {metadata_raw}. Using empty metadata."
+        )
         file_metadata = {}
 
     file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)

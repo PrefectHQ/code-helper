@@ -279,9 +279,12 @@ async def hybrid_search(
     limit: int = 20,
 ):
     keyword_documents = await keyword_search_documents(session, query_text)
-    vector_documents = await vector_search_documents(session, query_vector)
-    documents = reciprocal_rank_fusion(vector_documents, keyword_documents)
-    document_ids = [d[0] for d in documents]
+
+    # TODO: RRF on documents yielded poorer results than just keyword search.
+    # vector_documents = await vector_search_documents(session, query_vector)
+    # documents = reciprocal_rank_fusion(vector_documents, keyword_documents)
+
+    document_ids = [d[0] for d in keyword_documents]
 
     vector_fragment_results = await vector_search_document_fragments(
         session, query_vector, document_ids, filenames=filenames, limit=limit

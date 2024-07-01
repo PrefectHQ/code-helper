@@ -18,7 +18,7 @@ run-api: ## Run the API
 	uvicorn app:app
 
 .PHONY: run-api-dev
-run-api: ## Run the API in reload mode
+run-api-dev: ## Run the API in reload mode
 	uvicorn app:app --reload
 
 .PHONY: create-embeddings
