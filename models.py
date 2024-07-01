@@ -12,15 +12,13 @@ from sqlalchemy import (
     JSON,
     Index,
     Computed,
-    event,
+    text,
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import TSVECTOR
-from sqlalchemy.orm import Session
-from sqlalchemy.sql import text
 
 DATABASE_URL = "postgresql+asyncpg://username:password@localhost:5432/code_helper"
 engine = create_async_engine(DATABASE_URL, echo=True)
@@ -90,13 +88,11 @@ async def get_session() -> AsyncSession:
         yield session
 
 
-@event.listens_for(DocumentFragment, "before_insert")
-@event.listens_for(DocumentFragment, "before_update")
-def update_document_fragment_tsvector(mapper, connection, target):
+async def update_document_fragment_tsvector(session: AsyncSession, fragment_id: int):
     """
-    An event listener that automatically updates TSVECTOR columns
+    Update TSVECTOR columns for a given document fragment
     """
-    connection.execute(
+    await session.execute(
         text(
             """
             UPDATE document_fragments
@@ -104,9 +100,9 @@ def update_document_fragment_tsvector(mapper, connection, target):
             WHERE id = :id
             """
         ),
-        {"id": target.id},
+        {"id": fragment_id},
     )
-    connection.execute(
+    await session.execute(
         text(
             """
             UPDATE document_fragments
@@ -114,13 +110,35 @@ def update_document_fragment_tsvector(mapper, connection, target):
             WHERE id = :id
             """
         ),
-        {"id": target.id},
+        {"id": fragment_id},
     )
+    await session.commit()
 
 
-def keyword_search_documents(session: Session, query: str, limit: int = 10):
+async def create_document_fragment(session: AsyncSession, **fragment_data):
+    """
+    Create a document fragment and update TSVECTOR columns
+    """
+    fragment = DocumentFragment(**fragment_data)
+    session.add(fragment)
+    await session.flush()
+    await update_document_fragment_tsvector(session, fragment.id)
+    return fragment
+
+
+async def create_document(session: AsyncSession, **document_data):
+    """
+    Create a document.
+    """
+    document = Document(**document_data)
+    session.add(document)
+    await session.flush()
+    return document
+
+
+async def keyword_search_documents(session: AsyncSession, query: str, limit: int = 10):
     query_or = "|".join(query.split())
-    results = session.execute(
+    results = await session.execute(
         text(
             """
             SELECT * FROM documents
@@ -130,14 +148,14 @@ def keyword_search_documents(session: Session, query: str, limit: int = 10):
             """
         ),
         {"query": query_or, "limit": limit},
-    ).fetchall()
-    return results
+    )
+    return results.fetchall()
 
 
-def keyword_search_document_fragments(
-    session: Session,
+async def keyword_search_document_fragments(
+    session: AsyncSession,
     query_text: str,
-    document_ids,
+    document_ids: List[int],
     filenames: Optional[List[str]] = None,
     limit: int = 20,
 ):
@@ -171,11 +189,11 @@ def keyword_search_document_fragments(
         """
     )
 
-    results = session.execute(text(query), opts).fetchall()
-    return results
+    results = await session.execute(text(query), opts)
+    return results.fetchall()
 
 
-def vector_search_documents(session, query_vector, limit=10):
+async def vector_search_documents(session: AsyncSession, query_vector, limit=10):
     query_fragments = text(
         """
         SELECT *, documents.vector <-> :query_vector as score
@@ -185,17 +203,18 @@ def vector_search_documents(session, query_vector, limit=10):
         """
     )
 
-    return session.execute(
+    results = await session.execute(
         query_fragments,
         {
             "query_vector": str(query_vector),
             "limit": limit,
         },
-    ).fetchall()
+    )
+    return results.fetchall()
 
 
-def vector_search_document_fragments(
-    session, query_vector, document_ids=None, filenames=None, limit=20
+async def vector_search_document_fragments(
+    session: AsyncSession, query_vector, document_ids=None, filenames=None, limit=20
 ):
     opts = {
         "query_vector": str(query_vector),
@@ -228,10 +247,8 @@ def vector_search_document_fragments(
     )
     query_fragments = text(query)
 
-    return session.execute(
-        query_fragments,
-        opts,
-    ).fetchall()
+    results = await session.execute(query_fragments, opts)
+    return results.fetchall()
 
 
 def reciprocal_rank_fusion(
@@ -255,7 +272,7 @@ def reciprocal_rank_fusion(
 
 
 async def hybrid_search(
-    session: Session,
+    session: AsyncSession,
     query_text: str,
     query_vector: list[float],
     filenames: Optional[List[str]] = None,

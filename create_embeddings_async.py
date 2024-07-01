@@ -17,7 +17,14 @@ from code_fragment_extractor import (
     extract_code_fragments_from_file_content,
     extract_imports_from_file_content,
 )
-from models import Document, DocumentFragment, get_session
+from models import (
+    Document,
+    DocumentFragment,
+    get_session,
+    create_document,
+    create_document_fragment,
+)
+from file_cache import file_cache
 
 load_dotenv()
 
@@ -47,6 +54,7 @@ async def get_embedding_model():
 #     cache_expiration=timedelta(days=7),
 #     tags=["openai"],
 # )
+@file_cache
 @marvin.fn
 async def summarize_code(code: str) -> str:
     """
@@ -68,6 +76,7 @@ async def summarize_code(code: str) -> str:
 #     cache_expiration=timedelta(days=7),
 #     tags=["openai"],
 # )
+@file_cache
 @marvin.fn()
 async def extract_metadata(code: str) -> str:
     """
@@ -140,8 +149,7 @@ async def extract_metadata(code: str) -> str:
 #     cache_expiration=timedelta(days=7),
 #     tags=["model"],
 # )
-
-
+@file_cache
 async def embed_text_with_instructor(text: str):
     instruction = "Represent the code snippet:"
     model = await get_embedding_model()
@@ -154,6 +162,7 @@ async def embed_text_with_instructor(text: str):
 #     cache_key_fn=task_input_hash,
 #     cache_expiration=timedelta(days=7),
 # )
+@file_cache
 async def clean_text(text):
     return text.replace("\x00", "")
 
@@ -273,7 +282,8 @@ async def process_file(filepath, session, replace_existing=False):
         ]
     fragment_metadata = [f.result() for f in fragment_metadata_tasks]
 
-    document = Document(
+    document = await create_document(
+        session,
         filename=os.path.basename(filepath),
         filepath=filepath,
         file_content=cleaned_content,
@@ -282,23 +292,20 @@ async def process_file(filepath, session, replace_existing=False):
         meta=file_metadata,
         updated_at=updated_at,
     )
-    session.add(document)
-    await session.flush()  # Flush to get the ID of the document record
 
     for fragment, vector, metadata in zip(
         fragments, fragment_vectors, fragment_metadata
     ):
-        document_fragment = DocumentFragment(
+        await create_document_fragment(
+            session,
             document_id=document.id,
             fragment_content=fragment,
             vector=vector,
             updated_at=updated_at,
             meta=metadata,
         )
-        session.add(document_fragment)
 
     await session.commit()
-    await session.close()
 
     print(f"Processed file: {filepath}")
 
