@@ -1,3 +1,5 @@
+import os
+
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -20,8 +22,11 @@ from sqlalchemy.orm import sessionmaker, relationship
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
+
+ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
+
 DATABASE_URL = "postgresql+asyncpg://username:password@localhost:5432/code_helper"
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=ECHO_SQL_QUERIES)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
 

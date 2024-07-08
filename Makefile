@@ -15,11 +15,11 @@ help: ## Show this help
 
 .PHONY: run-api
 run-api: ## Run the API
-	uvicorn app:app
+	uvicorn code_helper.app:app
 
 .PHONY: run-api-dev
 run-api-dev: ## Run the API in reload mode
-	uvicorn app:app --reload
+	uvicorn code_helper.app:app --reload
 
 .PHONY: create-embeddings
 create-embeddings: ## Run the processing code recursively with a directory

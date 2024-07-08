@@ -2,10 +2,10 @@ import re
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from InstructorEmbedding import INSTRUCTOR
-
-from models import hybrid_search, get_session
-from schemas import SearchResponse, SearchRequest
 from logging import getLogger
+
+from code_helper.models import hybrid_search, get_session
+from code_helper.schemas import SearchResponse, SearchRequest
 
 load_dotenv()
 
