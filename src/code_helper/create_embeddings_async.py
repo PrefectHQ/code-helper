@@ -281,11 +281,6 @@ async def process_file(
     updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
     metadata_raw = await with_retries(extract_metadata, cleaned_content)
 
-    print("METADATA: ", metadata_raw)
-
-    # Why is extracting metadata returning a summary?
-    # Is it the cache...?
-
     try:
         file_metadata = json.loads(metadata_raw)
     except (ValueError, json.JSONDecodeError, TypeError) as e:
