@@ -168,7 +168,7 @@ async def clean_text(text):
 
 async def with_retries(llm_task: Any, text: str) -> Any:
     """
-    Sent text to an LLM task and use various attempts to retry if it fails.
+    Send text to an LLM task and use various attempts to retry if it fails.
 
     TODO: Should probably just be a decorator.
     TODO: One finalizer.
