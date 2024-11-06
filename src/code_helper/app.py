@@ -1,37 +1,16 @@
 import re
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from InstructorEmbedding import INSTRUCTOR
 from logging import getLogger
 
-from code_helper.models import hybrid_search, get_session
-from code_helper.schemas import SearchResponse, SearchRequest
+from dotenv import load_dotenv
+from fastapi import FastAPI
+
+from code_helper.create_embeddings_async import generate_embeddings
+from code_helper.models import get_session, hybrid_search
+from code_helper.schemas import SearchRequest, SearchResponse
 
 load_dotenv()
 
 logger = getLogger(__name__)
-
-# Lazy load the Instructor-XL model
-_model = None
-
-
-def get_model():
-    global _model
-    if _model is None:
-        _model = INSTRUCTOR("hkunlp/instructor-xl")
-    return _model
-
-
-def vectorize_query(query_text: str):
-    """
-    Vectorize the query text using the Instructor-XL model
-    """
-    model = get_model()
-
-    # Test using the same instruction we used for embedding code
-    # instruction = "Represent the code snippet:"
-    instruction = "Represent the search query:"
-    return model.encode([instruction, query_text])[0].tolist()
 
 
 app = FastAPI(
@@ -55,7 +34,7 @@ async def search_embeddings(request: SearchRequest):
     async with get_session() as session:
         query_text = request.query_text
         filenames = extract_filenames(query_text)
-        query_vector = vectorize_query(query_text)
+        query_vector = await generate_embeddings(query_text)
 
         results = await hybrid_search(
             session, query_text, query_vector, filenames, limit=10

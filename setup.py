@@ -10,4 +10,9 @@ setup(
     author="Andrew Brookins",
     author_email="andrew.b@prefect.io",
     description="",
+    entry_points={
+        "console_scripts": [
+            "index_files=code_helper.create_embeddings_async:main",
+        ],
+    },
 )

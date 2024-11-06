@@ -1,5 +1,5 @@
 # Define variables
-PYTHON = python
+PYTHON = ./env/bin/python
 ALEMBIC = alembic
 PYTEST = pytest
 
@@ -26,8 +26,8 @@ create-embeddings: ## Run the processing code recursively with a directory
 	@echo "Running create_embeddings.py with directory: $(DIRECTORY)"
 	$(PYTHON) create_embeddings.py $(DIRECTORY)
 
-.PHONY: migrations
-migrations: ## Run Alembic migrations
+.PHONY: migrate
+migrate: ## Run Alembic migrations
 	$(ALEMBIC) upgrade head
 
 .PHONY: create-migration
@@ -47,9 +47,18 @@ setup-db: ## Setup the initial database
 drop-db: ## Drop the database
 	@read -p "Are you sure you want to drop the database? (y/N): " confirm; \
 	if [ "$$confirm" = "y" ]; then \
-		$(PYTHON) -c 'from models import Base, engine; Base.metadata.drop_all(engine)'; \
+		$(PYTHON) -c 'import asyncio; from code_helper.models import async_drop_db; asyncio.run(async_drop_db())' \
 	else \
 		echo "Drop database cancelled."; \
+	fi
+
+.PHONY: init-db
+init-db: ## Initialize the database
+	@read -p "Are you sure you want to initialize the database? (y/N): " confirm; \
+	if [ "$$confirm" = "y" ]; then \
+		$(PYTHON) -c 'import asyncio; from code_helper.models import init_db; asyncio.run(init_db())' \
+	else \
+		echo "Initialize database cancelled."; \
 	fi
 
 .PHONY: clean

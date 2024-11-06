@@ -1,10 +1,6 @@
-transformers
-torch
-InstructorEmbedding
 sqlalchemy
-sentence-transformers==2.2.2
 psycopg2-binary
-prefect>=3.0.0rc3
+prefect
 fastapi
 pgvector
 marvin
@@ -14,3 +10,6 @@ pytest
 marvin
 protobuf
 joblib
+aiofiles
+transformers
+torch

@@ -1,31 +1,36 @@
 import os
-
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import List, Optional, Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, List, Optional
+
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
     Column,
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    DateTime,
-    ForeignKey,
-    JSON,
-    Index,
-    Computed,
+    and_,
+    func,
+    or_,
+    select,
     text,
 )
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import TSVECTOR
-
+from sqlalchemy.orm import relationship, sessionmaker
 
 ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
 
-DATABASE_URL = "postgresql+asyncpg://username:password@localhost:5432/code_helper"
+DATABASE_URL = (
+    "postgresql+asyncpg://code_helper:help-me-code@localhost:5432/code_helper"
+)
 engine = create_async_engine(DATABASE_URL, echo=ECHO_SQL_QUERIES)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
 Base = declarative_base()
@@ -33,44 +38,130 @@ Base = declarative_base()
 
 class Document(Base):
     __tablename__ = "documents"
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     filename = Column(String, nullable=False)
     filepath = Column(String, unique=True, nullable=False)
-    file_content = Column(Text, nullable=False)
+    path_array = Column(ARRAY(String), nullable=False)
+    summary = Column(Text, nullable=True)
     tsv_content = Column(
         TSVECTOR,
         Computed(
             "setweight(to_tsvector('english', coalesce(filename, '')), 'A') || "
-            "setweight(to_tsvector('english', coalesce(summary, '')), 'B') || "
-            "setweight(to_tsvector('english', coalesce(file_content, '')), 'C')"
+            "setweight(to_tsvector('english', coalesce(summary, '')), 'B')",
+            persisted=True,
         ),
         nullable=True,
     )
     vector = Column(Vector(768), nullable=False)
-    summary = Column(Text, nullable=True)
     meta = Column(JSON, nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    hierarchy_meta = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     __table_args__ = (
+        Index("idx_document_path_array", path_array, postgresql_using="gin"),
+        Index("idx_document_filepath", filepath),
         Index("ix_documents_tsv_content", "tsv_content", postgresql_using="gin"),
     )
+
+    @classmethod
+    async def get_directory_contents(cls, session, directory_path: str):
+        """Get all files and subdirectories in a directory."""
+        path_parts = directory_path.split(os.sep)
+        return await session.execute(
+            select(cls).where(
+                and_(
+                    func.array_length(cls.path_array, 1) == len(path_parts) + 1,
+                    cls.path_array[: len(path_parts)].contains(path_parts),
+                )
+            )
+        )
+
+    @classmethod
+    async def get_siblings(cls, session, filepath: str):
+        """Get all files in the same directory."""
+        doc = await session.execute(select(cls).where(cls.filepath == filepath))
+        if doc is None:
+            return []
+
+        parent_path = doc.hierarchy_meta["parent"]
+        if not parent_path:
+            return []
+
+        return await session.execute(
+            select(cls).where(cls.hierarchy_meta["parent"] == parent_path)
+        )
+
+    @classmethod
+    async def find_by_path(cls, session, filepath: str):
+        """Find a document by its exact filepath."""
+        return await session.scalar(select(cls).where(cls.filepath == filepath))
+
+    @classmethod
+    async def find_outdated(cls, session, max_age_days: int = 30):
+        """Find documents that haven't been updated recently."""
+        cutoff_date = datetime.utcnow() - timedelta(days=max_age_days)
+        return await session.scalars(select(cls).where(cls.updated_at < cutoff_date))
+
+    @classmethod
+    async def search_by_text(cls, session, query: str, limit: int = 10):
+        """Search documents using full-text search."""
+        ts_query = func.plainto_tsquery("english", query)
+        return await session.scalars(
+            select(cls)
+            .where(cls.tsv_content.op("@@")(ts_query))
+            .order_by(func.ts_rank(cls.tsv_content, ts_query).desc())
+            .limit(limit)
+        )
+
+    @classmethod
+    async def find_similar_by_vector(cls, session, vector, limit: int = 5):
+        """Find similar documents using vector similarity."""
+        return await session.scalars(
+            select(cls).order_by(cls.vector.cosine_distance(vector)).limit(limit)
+        )
+
+    @classmethod
+    async def get_all_in_directory(
+        cls, session, directory_path: str, recursive: bool = False
+    ):
+        """Get all documents in a directory, optionally recursive."""
+        if recursive:
+            return await session.scalars(
+                select(cls).where(
+                    func.array_to_string(cls.path_array, "/").like(
+                        f"{directory_path}/%"
+                    )
+                )
+            )
+        else:
+            path_parts = directory_path.split("/")
+            return await session.scalars(
+                select(cls).where(
+                    and_(
+                        func.array_length(cls.path_array, 1) == len(path_parts) + 1,
+                        cls.path_array[: len(path_parts)] == path_parts,
+                    )
+                )
+            )
 
 
 class DocumentFragment(Base):
     __tablename__ = "document_fragments"
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
-    fragment_content = Column(Text, nullable=False)
-    fragment_content_tsv = Column(TSVECTOR, nullable=False)
+    fragment_content = Column(Text, nullable=True)
+    fragment_content_tsv = Column(TSVECTOR, nullable=True)
     summary = Column(Text, nullable=True)
     summary_tsv = Column(TSVECTOR, nullable=True)
-    vector = Column(Vector(768), nullable=False)
+    vector = Column(Vector(768), nullable=True)
     meta = Column(JSON, nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    hierarchy_meta = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     document = relationship("Document", back_populates="fragments")
 
     __table_args__ = (
+        Index("idx_fragment_document", document_id),
         Index(
             "ix_document_fragments_fragment_content_tsv",
             "fragment_content_tsv",
@@ -80,6 +171,109 @@ class DocumentFragment(Base):
             "ix_document_fragments_summary_tsv", "summary_tsv", postgresql_using="gin"
         ),
     )
+
+    @classmethod
+    async def get_related_fragments(cls, session, fragment_id: int):
+        """Get related fragments (siblings, parent, children) for a given fragment."""
+        fragment = await session.execute(select(cls).where(cls.id == fragment_id))
+        if fragment is None:
+            return []
+
+        return await session.execute(
+            select(cls).where(
+                and_(
+                    cls.document_id == fragment.document_id,
+                    cls.fragment_meta["parent"] == fragment.fragment_meta["parent"],
+                )
+            )
+        )
+
+    @classmethod
+    async def find_by_document(cls, session, document_id: int):
+        """Find all fragments for a given document."""
+        return await session.scalars(
+            select(cls)
+            .where(cls.document_id == document_id)
+            .order_by(cls.fragment_meta["index"])
+        )
+
+    @classmethod
+    async def search_fragments(cls, session, query: str, limit: int = 10):
+        """Search fragments using full-text search."""
+        ts_query = func.plainto_tsquery("english", query)
+        return await session.scalars(
+            select(cls)
+            .where(
+                or_(
+                    cls.fragment_content_tsv.op("@@")(ts_query),
+                    cls.summary_tsv.op("@@")(ts_query),
+                )
+            )
+            .order_by(
+                func.ts_rank(
+                    cls.fragment_content_tsv + cls.summary_tsv, ts_query
+                ).desc()
+            )
+            .limit(limit)
+        )
+
+    @classmethod
+    async def find_similar_fragments(cls, session, vector, limit: int = 5):
+        """Find similar fragments using vector similarity."""
+        return await session.scalars(
+            select(cls).order_by(cls.vector.cosine_distance(vector)).limit(limit)
+        )
+
+    @classmethod
+    async def get_by_type(cls, session, document_id: int, fragment_type: str):
+        """Get all fragments of a specific type (e.g., 'class', 'function')."""
+        return await session.scalars(
+            select(cls).where(
+                and_(
+                    cls.document_id == document_id,
+                    cls.fragment_meta["type"].astext == fragment_type,
+                )
+            )
+        )
+
+    @classmethod
+    async def get_children_of_fragment(cls, session, fragment_id: int):
+        """Get all child fragments of a given fragment (e.g., methods of a class)."""
+        parent_fragment = await session.get(cls, fragment_id)
+        if not parent_fragment:
+            return []
+
+        return await session.scalars(
+            select(cls).where(
+                and_(
+                    cls.document_id == parent_fragment.document_id,
+                    cls.fragment_meta["parent"].astext
+                    == parent_fragment.fragment_meta["name"],
+                )
+            )
+        )
+
+    @classmethod
+    async def get_siblings(cls, session, fragment_id: int):
+        """Get siblings of a given fragment."""
+        fragment = await session.execute(
+            select(cls).where(cls.id == fragment_id)
+        )
+        if fragment is None:
+            return []
+
+        # Get all fragments from the same document with the same parent
+        return await session.execute(
+            select(cls)
+            .where(
+                and_(
+                    cls.document_id == fragment.document_id,
+                    cls.fragment_meta["parent"]
+                    == fragment.fragment_meta["parent"],
+                )
+            )
+        )
+
 
 
 Document.fragments = relationship(
@@ -91,6 +285,17 @@ Document.fragments = relationship(
 async def get_session() -> AsyncSession:
     async with SessionLocal() as session:
         yield session
+
+
+async def async_drop_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def update_document_fragment_tsvector(session: AsyncSession, fragment_id: int):
@@ -234,7 +439,7 @@ async def vector_search_document_fragments(
         SELECT document_fragments.id,
                documents.id as document_id,
                documents.filename,
-               documents.filepath,              
+               documents.filepath,
                documents.meta as document_meta,
                document_fragments.fragment_content,
                document_fragments.summary,

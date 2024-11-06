@@ -4,7 +4,7 @@ import os
 import shutil
 import hashlib
 import pickle
-from file_cache import (
+from code_helper.file_cache import (
     file_cache,
     DEFAULT_CACHE_DIR,
 )

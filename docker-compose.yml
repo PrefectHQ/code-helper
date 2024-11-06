@@ -3,8 +3,8 @@ services:
     image: pgvector/pgvector:pg16
     container_name: pgvector-db
     environment:
-      POSTGRES_USER: username
-      POSTGRES_PASSWORD: password
+      POSTGRES_USER: code_helper
+      POSTGRES_PASSWORD: help-me-code
       POSTGRES_DB: code_helper
     ports:
       - "5432:5432"
