@@ -1,12 +1,12 @@
+import ast
 import asyncio
-import json
 import logging
 import os
 import sys
 from datetime import datetime
 from functools import wraps
 from logging import getLogger
-from typing import Any
+from typing import Any, Union
 
 import aiofiles
 import click
@@ -18,7 +18,7 @@ from transformers import AutoModel, AutoTokenizer
 
 from code_helper.code_fragment_extractor import (
     extract_code_fragments_from_file_content,
-    extract_imports_from_file_content,
+    extract_metadata_from_fragment,
 )
 from code_helper.file_cache import CacheStrategy, file_cache
 from code_helper.models import (
@@ -101,80 +101,6 @@ async def summarize_code(code_fragments: list[str]) -> list[str]:
     - A function for generating a random password reset token for a user.
 
     - A function representing a CLI command for listing all users in the database.
-    """
-
-
-@file_cache(cache_strategy=AI_FN_CACHE_STRATEGY)
-@marvin.fn
-async def extract_metadata(code_fragments: list[str]) -> list[dict[str, Any]]:
-    """
-    Extract metadata from the code fragments `code_fragments` to support natural
-    language search. Return a list of dictionaries, each containing metadata for a
-    code fragment.
-
-    For each code fragment:
-    - Identify if it is a function, class, or module.
-        - If a fragment contains multiple functions and/or classes, it is a module.
-    - If it represents a function:
-        - Extract the function name and primary component type
-        - Identify parameters, return types, and decorators
-        - Note if it's async/sync and access level
-        - List exceptions raised
-    - If it represents a class:
-        - Extract the class name and parent class
-        - List major attributes and their types
-        - Note if abstract/concrete
-        - Identify implemented interfaces
-        - Note design patterns used
-    - If it represents a module:
-        - Extract the primary component type
-        - Include any relevant metadata for search
-        - List functions and classes
-        - Note module category and dependencies
-        - Identify configuration constants
-
-    *Exclude* metadata related to import statements.
-
-    Return a JSON object with metadata classifications and values in string format.
-    This JSON object should be valid and parsable by Python's `json` module.
-
-    **Example output:**
-    ```json
-    {
-        "type": "function",
-        "name": "get_user",
-        "component": "utilities",
-        "is_async": false,
-        "access": "public",
-        "parameters": ["user_id: int", "include_deleted: bool = False"],
-        "return_type": "User",
-        "raises": ["NotFoundError", "ValidationError"],
-        "decorators": ["@validate_input"]
-    },
-    {
-        "type": "class",
-        "name": "User",
-        "parent_class": "BaseModel",
-        "component": "data models",
-        "attributes": {
-            "id": "int",
-            "username": "str",
-            "email": "str"
-        },
-        "is_abstract": false,
-        "interfaces": ["Serializable"],
-        "design_pattern": "Active Record"
-    },
-    {
-        "type": "module",
-        "component": "API controllers",
-        "classes": ["UserController"],
-        "functions": ["validate_token"],
-        "category": "web",
-        "config_constants": ["MAX_USERS", "TOKEN_EXPIRY"],
-        "dependencies": ["auth", "database"]
-    }
-    ```
     """
 
 
@@ -310,20 +236,9 @@ async def process_document_content(content: str) -> tuple[str, list, dict, str]:
     file_summary = await batch_process_with_retries(summarize_code, [cleaned_content])
     file_vector = await generate_embeddings(cleaned_content)
 
-    metadata_raw = await batch_process_with_retries(extract_metadata, [cleaned_content])
-    if not metadata_raw:
-        logger.error("No metadata returned")
-        file_metadata = {}
-    else:
-        try:
-            file_metadata = json.loads(metadata_raw[0])
-        except (ValueError, json.JSONDecodeError, TypeError) as e:
-            logger.error(
-                f"Error extracting metadata: {e}. Raw metadata: {metadata_raw}. Using empty metadata."
-            )
-            file_metadata = {}
+    # Replace LLM metadata extraction with AST-based extraction
+    file_metadata = extract_metadata_from_fragment(cleaned_content)
 
-    file_metadata["imports"] = extract_imports_from_file_content(cleaned_content)
     return cleaned_content, file_vector, file_metadata, file_summary[0]
 
 
@@ -335,24 +250,11 @@ async def process_fragments(content: str) -> tuple[list, list, list]:
         fragment_vectors_tasks = [
             tg.create_task(generate_embeddings(frag)) for frag in fragments
         ]
-        # Use batch processing for metadata
-        fragment_metadata = await batch_process_with_retries(
-            extract_metadata, fragments
-        )
 
     fragment_vectors = [f.result() for f in fragment_vectors_tasks]
+    fragment_metadata = [extract_metadata_from_fragment(fragment) for fragment in fragments]
 
-    # Parse the JSON metadata strings into dictionaries
-    parsed_metadata = []
-    for metadata_str in fragment_metadata:
-        try:
-            metadata = json.loads(metadata_str)
-        except (ValueError, json.JSONDecodeError, TypeError) as e:
-            logger.error(f"Error parsing fragment metadata: {e}. Using empty metadata.")
-            metadata = {}
-        parsed_metadata.append(metadata)
-
-    return fragments, fragment_vectors, parsed_metadata
+    return fragments, fragment_vectors, fragment_metadata
 
 
 async def process_file(
