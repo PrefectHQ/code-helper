@@ -3,7 +3,7 @@ from asyncio import Semaphore, TaskGroup
 from sqlalchemy import text
 
 from code_helper.models import get_session, update_document_fragment_tsvector
-from code_helper.create_embeddings_async import summarize_code, with_retries
+from code_helper.index import summarize_code, with_retries
 
 
 async def do_update(session, row, limiter):

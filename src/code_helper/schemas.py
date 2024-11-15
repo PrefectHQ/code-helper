@@ -1,3 +1,4 @@
+from typing import Any
 from pydantic import BaseModel
 
 
@@ -11,7 +12,7 @@ class SearchResult(BaseModel):
     filename: str
     filepath: str
     fragment_content: str
-    metadata: str
+    metadata: dict[str, Any]
     imports: list[str]
 
 

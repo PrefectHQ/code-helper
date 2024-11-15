@@ -12,7 +12,7 @@ setup(
     description="",
     entry_points={
         "console_scripts": [
-            "index_files=code_helper.create_embeddings_async:main",
+            "index_files=code_helper.index:main",
         ],
     },
 )

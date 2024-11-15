@@ -2,7 +2,9 @@ import pytest
 from code_helper.code_fragment_extractor import (
     extract_code_fragments_from_file_content,
     extract_metadata_from_fragment,
+    extract_metadata_from_node,
 )
+import ast
 
 
 @pytest.fixture
@@ -34,21 +36,37 @@ def standalone_function(x: int) -> int:
     return x * 2
 '''
 
+
 def test_extract_code_fragments(sample_code):
     fragments = extract_code_fragments_from_file_content(sample_code)
 
-    # Should extract 4 fragments: 2 functions and 1 class
-    assert len(fragments) == 4
+    # Verify we get (node, string) tuples
+    assert len(fragments) == 6
+    assert all(isinstance(f, tuple) and len(f) == 2 for f in fragments)
 
-    # Check if each expected fragment is present
-    function_names = ['simple_function', 'async_function', 'SimpleClass', 'standalone_function']
-    for fragment in fragments:
-        assert any(name in fragment for name in function_names)
+    # Verify specific content in fragments (using string part)
+    for expected_fragment in [
+        "def simple_function",
+        "async def async_function",
+        "class SimpleClass",
+        "def __init__",
+        "def title",
+        "def standalone_function",
+    ]:
+        assert any(
+            expected_fragment in f[1] for f in fragments
+        ), f"Expected {expected_fragment} not found"
 
-    # Verify specific content in fragments
-    assert any('async def async_function' in f for f in fragments)
-    assert any('@decorator\nclass SimpleClass' in f for f in fragments)
-    assert any('def standalone_function' in f for f in fragments)
+    # Verify method metadata
+    for node, _ in fragments:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            metadata = extract_metadata_from_node(node)
+            if hasattr(node, "parent_class"):
+                assert metadata["type"] == "method"
+                assert "parent" in metadata
+                assert "parent_classes" in metadata
+            else:
+                assert metadata["type"] == "function"
 
 
 def test_extract_metadata_simple_function():
@@ -59,20 +77,20 @@ def test_function(param1: str, param2: int = 0) -> bool:
 '''
     metadata = extract_metadata_from_fragment(code)
 
-    assert metadata['type'] == 'module'
-    assert len(metadata['functions']) == 1
+    assert metadata["type"] == "module"
+    assert len(metadata["functions"]) == 1
 
-    function = metadata['functions'][0]
-    assert function['type'] == 'function'
-    assert function['name'] == 'test_function'
-    assert function['is_async'] is False
-    assert len(function['parameters']) == 2
-    assert function['return_type'] == 'bool'
-    assert function['decorators'] == []
+    function = metadata["functions"][0]
+    assert function["type"] == "function"
+    assert function["name"] == "test_function"
+    assert function["is_async"] is False
+    assert len(function["parameters"]) == 2
+    assert function["return_type"] == "bool"
+    assert function["decorators"] == []
 
 
 def test_extract_metadata_class():
-    code = '''
+    code = """
 @decorator
 class TestClass:
     attr1: str
@@ -84,88 +102,166 @@ class TestClass:
     @property
     def prop1(self) -> str:
         return "value"
-'''
-    metadata = extract_metadata_from_fragment(code)
+"""
+    # First get the fragments to test node extraction
+    fragments = extract_code_fragments_from_file_content(code)
 
-    assert metadata['type'] == 'module'
-    assert len(metadata['classes']) == 1
+    # Find the class node and method nodes
+    class_node = next(node for node, _ in fragments if isinstance(node, ast.ClassDef))
+    method_nodes = [node for node, _ in fragments if isinstance(node, ast.FunctionDef)]
 
-    class_meta = metadata['classes'][0]
-    assert class_meta['type'] == 'class'
-    assert class_meta['name'] == 'TestClass'
-    assert len(class_meta['decorators']) == 1
-    assert class_meta['decorators'][0] == 'decorator'
+    # Test class metadata
+    class_meta = extract_metadata_from_node(class_node)
+    assert class_meta["type"] == "class"
+    assert class_meta["name"] == "TestClass"
+    assert len(class_meta["decorators"]) == 1
+    assert class_meta["decorators"][0] == "decorator"
 
-    # Check attributes
-    attributes = class_meta['attributes']
-    assert len(attributes) == 2
-    assert any(attr['name'] == 'attr1' and attr['type'] == 'str' for attr in attributes)
-    assert any(attr['name'] == 'attr2' and attr['has_default'] for attr in attributes)
-
-    # Check methods
-    methods = class_meta['methods']
-    assert len(methods) == 2
-    assert any(method['name'] == 'method1' for method in methods)
-    assert any(method['name'] == 'prop1' for method in methods)
+    # Test method metadata
+    for node in method_nodes:
+        method_meta = extract_metadata_from_node(node)
+        assert method_meta["type"] == "method"
+        assert method_meta["parent"] == "TestClass"
+        assert method_meta["parent_classes"] == ["TestClass"]
 
 
 def test_extract_metadata_async_function():
-    code = '''
+    code = """
 async def async_func(param: str) -> List[str]:
     return [param]
-'''
+"""
     metadata = extract_metadata_from_fragment(code)
 
-    function = metadata['functions'][0]
-    assert function['is_async'] is True
-    assert function['name'] == 'async_func'
-    assert function['parameters'] == ['param: str']
-    assert function['return_type'] == 'List[str]'
+    function = metadata["functions"][0]
+    assert function["is_async"] is True
+    assert function["name"] == "async_func"
+    assert function["parameters"] == ["param: str"]
+    assert function["return_type"] == "List[str]"
 
 
 def test_extract_metadata_invalid_code():
-    code = '''
+    code = """
     def invalid syntax{
-    '''
+    """
     metadata = extract_metadata_from_fragment(code)
 
-    assert metadata['type'] == 'module'
-    assert metadata['error'] == 'Could not parse code'
+    assert metadata["type"] == "module"
+    assert metadata["error"] == "Could not parse code"
 
 
 def test_extract_fragments_empty_code():
-    fragments = extract_code_fragments_from_file_content('')
+    fragments = extract_code_fragments_from_file_content("")
     assert fragments == []
 
 
 def test_extract_fragments_only_imports():
-    code = '''
+    code = """
 import os
 from typing import List
-'''
+"""
     fragments = extract_code_fragments_from_file_content(code)
     assert fragments == []
 
 
+def test_extract_metadata_inner_functions():
+    code = """
+def outer_function():
+    def inner_function1():
+        pass
+
+    async def inner_function2():
+        pass
+
+    return True
+"""
+    metadata = extract_metadata_from_fragment(code)
+
+    assert metadata["type"] == "function"
+    assert metadata["name"] == "outer_function"
+    assert len(metadata["inner_functions"]) == 2
+    assert metadata["inner_functions"][0]["name"] == "inner_function1"
+    assert metadata["inner_functions"][1]["name"] == "inner_function2"
+    assert metadata["inner_functions"][1]["is_async"] is True
+
+
 def test_extract_metadata_nested_classes():
-    code = '''
-class Outer:
-    class Inner:
-        def inner_method(self):
+    code = """
+class OuterClass:
+    class InnerClass1:
+        def method1(self):
             pass
+
+    class InnerClass2:
+        pass
 
     def outer_method(self):
         pass
-'''
+"""
+    fragments = extract_code_fragments_from_file_content(code)
+
+    # Verify all nodes have correct metadata
+    for node, _ in fragments:
+        metadata = extract_metadata_from_node(node)
+
+        if isinstance(node, ast.ClassDef):
+            assert metadata["type"] == "class"
+            if metadata["name"] == "OuterClass":
+                assert not hasattr(node, "parent_class")
+            else:
+                assert hasattr(node, "parent_class")
+                assert node.parent_class == "OuterClass"
+        else:  # FunctionDef
+            assert metadata["type"] == "method"
+            if metadata["name"] == "outer_method":
+                assert metadata["parent"] == "OuterClass"
+            else:
+                assert metadata["parent"] == "InnerClass1"
+
+    # Also test the full fragment metadata for nested structure
     metadata = extract_metadata_from_fragment(code)
+    assert metadata["type"] == "class"
+    assert metadata["name"] == "OuterClass"
+    assert len(metadata["nested_classes"]) == 2
+    assert metadata["nested_classes"][0]["name"] == "InnerClass1"
+    assert len(metadata["nested_classes"][0]["methods"]) == 1
+    assert metadata["nested_classes"][1]["name"] == "InnerClass2"
+    assert len(metadata["methods"]) == 1
+    assert metadata["methods"][0]["name"] == "outer_method"
 
-    assert len(metadata['classes']) == 2
-    outer_class = metadata['classes'][0]
-    assert outer_class['name'] == 'Outer'
-    assert len(outer_class['methods']) == 1
-    assert outer_class['methods'][0]['name'] == 'outer_method'
 
-    inner_class = metadata['classes'][1]
-    assert inner_class['name'] == 'Inner'
-    assert len(inner_class['methods']) == 1
-    assert inner_class['methods'][0]['name'] == 'inner_method'
+@pytest.mark.asyncio
+async def test_process_fragments_preserves_class_context():
+    test_content = """
+class TestClass:
+    def method1(self):
+        pass
+
+    async def method2(self):
+        pass
+"""
+    fragments, vectors, metadata = await process_fragments(test_content)
+
+    # Should have 3 fragments: class and two methods
+    assert len(fragments) == 3
+    assert len(vectors) == 3
+    assert len(metadata) == 3
+
+    # Verify class metadata
+    class_meta = next(m for m in metadata if m["type"] == "class")
+    assert class_meta["name"] == "TestClass"
+
+    # Verify method metadata
+    method_metas = [m for m in metadata if m["type"] == "method"]
+    assert len(method_metas) == 2
+
+    # Check regular method
+    method1 = next(m for m in method_metas if m["name"] == "method1")
+    assert method1["parent"] == "TestClass"
+    assert method1["parent_classes"] == ["TestClass"]
+    assert method1["is_async"] is False
+
+    # Check async method
+    method2 = next(m for m in method_metas if m["name"] == "method2")
+    assert method2["parent"] == "TestClass"
+    assert method2["parent_classes"] == ["TestClass"]
+    assert method2["is_async"] is True

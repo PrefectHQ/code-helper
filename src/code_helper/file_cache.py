@@ -3,6 +3,7 @@ import functools
 import hashlib
 import os
 import pickle
+import shutil
 import time
 
 import aiofiles
@@ -60,6 +61,7 @@ def file_cache(
     def decorator(coro):
         @functools.wraps(coro)
         async def wrapper(*args, **kwargs):
+
             key = build_cache_key(coro, args, kwargs, cache_strategy)
             key_hash = hashlib.md5(pickle.dumps(key)).hexdigest()
             cache_file = os.path.join(cache_dir, key_hash + file_extension)
@@ -87,3 +89,10 @@ def file_cache(
         return wrapper
 
     return decorator
+
+
+def bust_file_cache(
+    cache_dir=DEFAULT_CACHE_DIR,
+):
+    shutil.rmtree(cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)

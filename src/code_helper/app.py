@@ -4,7 +4,7 @@ from logging import getLogger
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from code_helper.create_embeddings_async import generate_embeddings
+from code_helper.index import generate_embeddings
 from code_helper.models import get_session, hybrid_search
 from code_helper.schemas import SearchRequest, SearchResponse
 
