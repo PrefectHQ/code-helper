@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, List, Optional
 
+import aiofiles
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     and_,
+    delete,
     func,
     or_,
     select,
@@ -198,24 +200,39 @@ class DocumentFragment(Base):
         )
 
     @classmethod
-    async def search_fragments(cls, session, query: str, limit: int = 10):
-        """Search fragments using full-text search."""
-        ts_query = func.plainto_tsquery("english", query)
-        return await session.scalars(
-            select(cls)
+    async def search_fragments(
+        cls,
+        session,
+        query_vector: list[float],
+        limit: int = 10,
+        document_ids: list[int] = None,
+    ) -> list[dict]:
+        """Search for similar code fragments."""
+        # Use the SQLAlchemy query directly instead of raw SQL
+        query = (
+            select(
+                cls.id,
+                cls.document_id,
+                cls.fragment_content,
+                cls.summary,
+                cls.meta,
+                cls.hierarchy_meta,
+                Document.filepath,
+                (1 - cls.vector.cosine_distance(query_vector)).label('similarity')
+            )
+            .join(Document, Document.id == cls.document_id)
             .where(
-                or_(
-                    cls.fragment_content_tsv.op("@@")(ts_query),
-                    cls.summary_tsv.op("@@")(ts_query),
-                )
+                (1 - cls.vector.cosine_distance(query_vector)) > 0.7
             )
-            .order_by(
-                func.ts_rank(
-                    cls.fragment_content_tsv + cls.summary_tsv, ts_query
-                ).desc()
-            )
-            .limit(limit)
         )
+
+        if document_ids:
+            query = query.where(cls.document_id.in_(document_ids))
+
+        query = query.order_by('similarity DESC').limit(limit)
+
+        results = await session.execute(query)
+        return results.all()
 
     @classmethod
     async def find_similar_fragments(cls, session, vector, limit: int = 5):
@@ -299,30 +316,12 @@ async def init_db(db_engine=engine):
 
 
 async def update_document_fragment_tsvector(session: AsyncSession, fragment_id: int):
-    """
-    Update TSVECTOR columns for a given document fragment
-    """
-    await session.execute(
-        text(
-            """
-            UPDATE document_fragments
-            SET fragment_content_tsv = to_tsvector('english', fragment_content)
-            WHERE id = :id
-            """
-        ),
-        {"id": fragment_id},
-    )
-    await session.execute(
-        text(
-            """
-            UPDATE document_fragments
-            SET summary_tsv = to_tsvector('english', summary)
-            WHERE id = :id
-            """
-        ),
-        {"id": fragment_id},
-    )
-    await session.commit()
+    """Update TSVECTOR columns for a given document fragment"""
+    fragment = await session.get(DocumentFragment, fragment_id)
+    if fragment:
+        fragment.fragment_content_tsv = func.to_tsvector('english', fragment.fragment_content)
+        fragment.summary_tsv = func.to_tsvector('english', fragment.summary)
+        await session.commit()
 
 
 async def create_document_fragment(session: AsyncSession, **fragment_data):
@@ -347,19 +346,26 @@ async def create_document(session: AsyncSession, **document_data):
 
 
 async def keyword_search_documents(session: AsyncSession, query: str, limit: int = 10):
-    query_or = "|".join(query.split())
-    results = await session.execute(
-        text(
-            """
-            SELECT * FROM documents
-            WHERE tsv_content @@ to_tsquery(:query)
-            ORDER BY ts_rank(tsv_content, to_tsquery(:query)) DESC
-            LIMIT :limit
-            """
-        ),
-        {"query": query_or, "limit": limit},
+    """Search documents using full-text search with keyword ranking.
+
+    Args:
+        session: Database session
+        query: Search query string
+        limit: Maximum number of results to return
+    """
+    # Convert space-separated keywords into OR query
+    query_or = func.to_tsquery('|'.join(query.split()))
+
+    # Build query using SQLAlchemy expressions
+    query = (
+        select(Document)
+        .where(Document.tsv_content.op('@@')(query_or))
+        .order_by(func.ts_rank(Document.tsv_content, query_or).desc())
+        .limit(limit)
     )
-    return results.fetchall()
+
+    results = await session.execute(query)
+    return results.scalars().all()
 
 
 async def keyword_search_document_fragments(
@@ -369,96 +375,110 @@ async def keyword_search_document_fragments(
     filenames: Optional[List[str]] = None,
     limit: int = 20,
 ):
-    query_or = "|".join(query_text.split())
-    opts = {"query": query_or, "limit": limit, "document_ids": document_ids}
-    if filenames:
-        opts["filenames"] = filenames
+    """Search document fragments using keyword search."""
+    # Convert space-separated keywords into OR query
+    query_or = func.to_tsquery('english', '|'.join(query_text.split()))
 
+    # Add check for empty document_ids
+    if not document_ids:
+        return []
+
+    # Build base query
     query = (
-        """
-        SELECT document_fragments.id,
-               documents.id as document_id,
-               documents.filename,
-               documents.filepath,
-               documents.meta as document_meta,
-               document_fragments.fragment_content,
-               document_fragments.summary,
-               document_fragments.meta
-        FROM document_fragments
-                 LEFT JOIN documents ON documents.id = document_fragments.document_id
-        WHERE document_fragments.document_id = ANY (:document_ids)
-          AND (
-            fragment_content_tsv @@ to_tsquery(:query)
-                OR document_fragments.summary_tsv @@ to_tsquery(:query)
+        select(
+            DocumentFragment.id,
+            Document.id.label('document_id'),
+            Document.filename,
+            Document.filepath,
+            Document.meta.label('document_meta'),
+            DocumentFragment.fragment_content,
+            DocumentFragment.summary,
+            DocumentFragment.meta,
+            func.ts_rank(DocumentFragment.fragment_content_tsv, query_or).label('rank')
+        )
+        .join(Document, DocumentFragment.document_id == Document.id)
+        .where(
+            and_(
+                DocumentFragment.document_id.in_(document_ids),
+                or_(
+                    DocumentFragment.fragment_content_tsv.op('@@')(query_or),
+                    DocumentFragment.summary_tsv.op('@@')(query_or)
+                )
             )
-            """
-        + ("AND filename = ANY(:filenames)" if filenames else "")
-        + """
-            ORDER BY ts_rank(fragment_content_tsv, to_tsquery(:query)) DESC
-            LIMIT :limit
-        """
+        )
     )
 
-    results = await session.execute(text(query), opts)
-    return results.fetchall()
+    # Add filename filter if provided
+    if filenames:
+        query = query.where(Document.filename.in_(filenames))
+
+    # Add ordering and limit
+    query = query.order_by(text('rank DESC')).limit(limit)
+
+    # Execute query
+    results = await session.execute(query)
+    return results.all()
 
 
 async def vector_search_documents(session: AsyncSession, query_vector, limit=10):
-    query_fragments = text(
-        """
-        SELECT *, documents.vector <-> :query_vector as score
-        FROM documents
-        ORDER BY score
-        LIMIT :limit
-        """
+    """Search documents using vector similarity."""
+    query = (
+        select(
+            Document,  # Select the full Document object first
+            (1 - Document.vector.cosine_distance(query_vector)).label('similarity')
+        )
+        .order_by(text('similarity DESC'))  # Fix: Wrap in text()
+        .limit(limit)
     )
 
-    results = await session.execute(
-        query_fragments,
-        {
-            "query_vector": str(query_vector),
-            "limit": limit,
-        },
-    )
-    return results.fetchall()
+    results = await session.execute(query)
+    return [result[0] for result in results]
 
 
 async def vector_search_document_fragments(
-    session: AsyncSession, query_vector, document_ids=None, filenames=None, limit=20
+    session: AsyncSession,
+    query_vector,
+    document_ids=None,
+    filenames=None,
+    limit=20
 ):
-    opts = {
-        "query_vector": str(query_vector),
-        "limit": limit,
-        "document_ids": document_ids,
-    }
-    if filenames:
-        opts["filenames"] = filenames
+    """Search for document fragments using vector similarity.
 
+    Args:
+        session: Database session
+        query_vector: Vector to compare against
+        document_ids: Optional list of document IDs to filter by
+        filenames: Optional list of filenames to filter by
+        limit: Maximum number of results to return
+    """
+    # Start with base query
     query = (
-        """
-        SELECT document_fragments.id,
-               documents.id as document_id,
-               documents.filename,
-               documents.filepath,
-               documents.meta as document_meta,
-               document_fragments.fragment_content,
-               document_fragments.summary,
-               document_fragments.meta,
-               document_fragments.vector <-> :query_vector as score
-        FROM document_fragments
-                 LEFT JOIN documents ON documents.id = document_fragments.document_id
-        WHERE document_fragments.document_id = ANY (:document_ids)
-    """
-        + ("AND filename = ANY(:filenames)" if filenames else "")
-        + """
-        ORDER BY score
-        LIMIT :limit
-    """
+        select(
+            DocumentFragment.id,
+            Document.id.label('document_id'),
+            Document.filename,
+            Document.filepath,
+            Document.meta.label('document_meta'),
+            DocumentFragment.fragment_content,
+            DocumentFragment.summary,
+            DocumentFragment.meta,
+            (DocumentFragment.vector.cosine_distance(query_vector)).label('score')
+        )
+        .join(Document, DocumentFragment.document_id == Document.id)
     )
-    query_fragments = text(query)
 
-    results = await session.execute(query_fragments, opts)
-    return results.fetchall()
+    # Add filters if provided
+    if document_ids:
+        query = query.where(DocumentFragment.document_id.in_(document_ids))
+    if filenames:
+        query = query.where(Document.filename.in_(filenames))
+
+    # Add ordering and limit
+    query = query.order_by('score').limit(limit)
+
+    # Execute query
+    results = await session.execute(query)
+    return results.all()
 
 
 def reciprocal_rank_fusion(
@@ -470,11 +490,14 @@ def reciprocal_rank_fusion(
 
     # Assign ranks to vector search results
     for rank, result in enumerate(vector_results, start=1):
-        rank_dict[result.id] += 1 / (rank + k)
+        # Handle both Document objects and Row results
+        result_id = result.id if hasattr(result, 'id') else result[0].id
+        rank_dict[result_id] += 1 / (rank + k)
 
     # Assign ranks to keyword search results
     for rank, result in enumerate(keyword_results, start=1):
-        rank_dict[result.id] += 1 / (rank + k)
+        result_id = result.id if hasattr(result, 'id') else result[0].id
+        rank_dict[result_id] += 1 / (rank + k)
 
     # Sort results by their cumulative rank
     sorted_results = sorted(rank_dict.items(), key=lambda item: item[1], reverse=True)
@@ -488,48 +511,105 @@ async def hybrid_search(
     filenames: Optional[List[str]] = None,
     limit: int = 20,
 ):
-    keyword_documents = await keyword_search_documents(session, query_text)
+    """Perform hybrid search across documents and fragments.
 
-    # TODO: RRF on documents yielded poorer results than just keyword search.
-    # vector_documents = await vector_search_documents(session, query_vector)
-    # documents = reciprocal_rank_fusion(vector_documents, keyword_documents)
+    Combines keyword and vector search results using reciprocal rank fusion.
+    First searches documents, then uses those document IDs to constrain fragment search.
+    """
+    # Get document-level matches and fuse results
+    vector_documents = await vector_search_documents(session, query_vector, limit=limit * 2)
+    keyword_documents = await keyword_search_documents(session, query_text, limit=limit * 2)
 
-    document_ids = [d[0] for d in keyword_documents]
+    document_results = reciprocal_rank_fusion(vector_documents, keyword_documents)
+    relevant_doc_ids = [doc_id for doc_id, _ in document_results[:limit]]
 
-    vector_fragment_results = await vector_search_document_fragments(
-        session, query_vector, document_ids, filenames=filenames, limit=limit
+    # Search fragments within relevant documents
+    vector_fragments = await vector_search_document_fragments(
+        session,
+        query_vector,
+        document_ids=relevant_doc_ids,
+        filenames=filenames,
+        limit=limit * 2
     )
-    keyword_fragment_results = await keyword_search_document_fragments(
-        session, query_text, document_ids, filenames=filenames, limit=limit
+
+    keyword_fragments = await keyword_search_document_fragments(
+        session,
+        query_text,
+        document_ids=relevant_doc_ids,
+        filenames=filenames,
+        limit=limit * 2
     )
-    combined_results = reciprocal_rank_fusion(
-        vector_fragment_results, keyword_fragment_results
+
+    # Fuse fragment results and format response
+    fragment_results = []
+    seen_fragments = set()
+
+    for frag_id, score in reciprocal_rank_fusion(vector_fragments, keyword_fragments):
+        if frag_id in seen_fragments:
+            continue
+
+        fragment = next(f for f in vector_fragments + keyword_fragments if f.id == frag_id)
+        seen_fragments.add(frag_id)
+
+        fragment_results.append({
+            "document_id": str(fragment.document_id),
+            "score": score,
+            "filename": fragment.filename,
+            "filepath": fragment.filepath,
+            "fragment_content": fragment.fragment_content,
+            "metadata": fragment.meta,
+            "imports": fragment.document_meta.get("imports", []) if fragment.document_meta else []
+        })
+
+        if len(fragment_results) >= limit:
+            break
+
+    return fragment_results
+
+
+async def read_and_validate_file(
+    filepath: str, session, replace_existing: bool, reindex_updated: bool
+) -> tuple[str, datetime] | None:
+    """Handle file reading and validation of processing conditions."""
+    try:
+        async with aiofiles.open(filepath, "r") as f:
+            file_content = await f.read()
+    except UnicodeDecodeError:
+        print(f"Error reading file: {filepath}")
+        return None
+
+    if not file_content:
+        print(f"File is empty: {filepath}")
+        return None
+
+    # Get existing document if any
+    existing_doc = await session.scalar(
+        select(Document.updated_at).where(Document.filepath == filepath)
     )
 
-    fragments_by_id = {
-        frag.id: frag for frag in vector_fragment_results + keyword_fragment_results
-    }
-
-    # Build the response based on the combined results sorted by their RRF score
-    response = []
-    seen_fragments = set()  # Track seen fragment IDs to avoid duplicates
-
-    for frag_id, score in combined_results:
-        if frag_id not in seen_fragments:
-            seen_fragments.add(frag_id)
-            fragment = fragments_by_id[frag_id]
-            imports = fragment.document_meta.get("imports", [])
-
-            response.append(
-                {
-                    "document_id": str(fragment.document_id),
-                    "score": score,
-                    "filename": fragment.filename,
-                    "filepath": fragment.filepath,
-                    "fragment_content": fragment.fragment_content,
-                    "metadata": fragment.meta,
-                    "imports": imports,
-                }
+    if existing_doc is not None:
+        if not replace_existing:
+            print(f"File already exists: {filepath}")
+            return None
+        # Delete existing document and its fragments
+        print(f"Deleting existing document: {filepath}")
+        await session.execute(
+            delete(DocumentFragment).where(
+                DocumentFragment.document_id.in_(
+                    select(Document.id).where(Document.filepath == filepath)
+                )
             )
+        )
+        await session.execute(delete(Document).where(Document.filepath == filepath))
+        await session.commit()
 
-    return response[:limit]
+        if reindex_updated:
+            updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
+            if updated_at <= existing_doc:
+                return None
+            print(f"File is updated: {filepath}. Reindexing.")
+
+    updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
+    return file_content, updated_at
+
+
