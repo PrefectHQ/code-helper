@@ -2,7 +2,7 @@ import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 import aiofiles
 from pgvector.sqlalchemy import Vector
@@ -152,9 +152,17 @@ class DocumentFragment(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
     fragment_content = Column(Text, nullable=True)
-    fragment_content_tsv = Column(TSVECTOR, nullable=True)
+    fragment_content_tsv = Column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(meta->>'name', '')), 'A') || "
+            "setweight(to_tsvector('english', coalesce(summary, '')), 'B') || "
+            "setweight(to_tsvector('english', coalesce(fragment_content, '')), 'C')",
+            persisted=True
+        ),
+        nullable=True
+    )
     summary = Column(Text, nullable=True)
-    summary_tsv = Column(TSVECTOR, nullable=True)
     vector = Column(Vector(768), nullable=True)
     meta = Column(JSON, nullable=True)
     hierarchy_meta = Column(JSON, nullable=True)
@@ -169,9 +177,7 @@ class DocumentFragment(Base):
             "fragment_content_tsv",
             postgresql_using="gin",
         ),
-        Index(
-            "ix_document_fragments_summary_tsv", "summary_tsv", postgresql_using="gin"
-        ),
+        Index('ix_document_fragments_tsv_content', 'fragment_content_tsv', postgresql_using='gin'),
     )
 
     @classmethod
@@ -315,23 +321,30 @@ async def init_db(db_engine=engine):
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def update_document_fragment_tsvector(session: AsyncSession, fragment_id: int):
-    """Update TSVECTOR columns for a given document fragment"""
-    fragment = await session.get(DocumentFragment, fragment_id)
-    if fragment:
-        fragment.fragment_content_tsv = func.to_tsvector('english', fragment.fragment_content)
-        fragment.summary_tsv = func.to_tsvector('english', fragment.summary)
-        await session.commit()
-
-
-async def create_document_fragment(session: AsyncSession, **fragment_data):
+async def create_document_fragment(
+    session: AsyncSession,
+    document_id: int,
+    fragment_content: str,
+    summary: str | None = None,
+    vector: list[float] | None = None,
+    meta: dict | None = None,
+    hierarchy_meta: dict | None = None,
+    updated_at: datetime | None = None,
+) -> DocumentFragment:
     """
-    Create a document fragment and update TSVECTOR columns
+    Create a document fragment with all necessary fields.
     """
-    fragment = DocumentFragment(**fragment_data)
+    fragment = DocumentFragment(
+        document_id=document_id,
+        fragment_content=fragment_content,
+        summary=summary,
+        vector=vector,
+        meta=meta,
+        hierarchy_meta=hierarchy_meta,
+        updated_at=updated_at or datetime.now(UTC),
+    )
     session.add(fragment)
     await session.flush()
-    await update_document_fragment_tsvector(session, fragment.id)
     return fragment
 
 
@@ -400,10 +413,7 @@ async def keyword_search_document_fragments(
         .where(
             and_(
                 DocumentFragment.document_id.in_(document_ids),
-                or_(
-                    DocumentFragment.fragment_content_tsv.op('@@')(query_or),
-                    DocumentFragment.summary_tsv.op('@@')(query_or)
-                )
+                DocumentFragment.fragment_content_tsv.op('@@')(query_or)
             )
         )
     )

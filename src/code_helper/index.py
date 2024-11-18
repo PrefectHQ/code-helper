@@ -215,24 +215,25 @@ async def read_and_validate_file(
         async with aiofiles.open(filepath, "r") as f:
             file_content = await f.read()
     except UnicodeDecodeError:
-        print(f"Error reading file: {filepath}")
+        logger.error(f"Error reading file: {filepath}")
         return None
 
     if not file_content:
-        print(f"File is empty: {filepath}")
+        logger.error(f"File is empty: {filepath}")
         return None
 
     query = await session.execute(
         select(Document.updated_at).where(Document.filepath == filepath)
     )
     result: datetime = query.scalar()
+    print(f"Result: {result}")
 
     if result is not None:
         if not replace_existing:
-            print(f"File already exists: {filepath}")
+            logger.error(f"File already indexed in database and not replacing: {filepath}")
             return None
         # Delete existing document and its fragments
-        print(f"Deleting existing document: {filepath}")
+        logger.info(f"Deleting existing document: {filepath}")
         await session.execute(
             delete(DocumentFragment).where(
                 DocumentFragment.document.has(filepath=filepath)
@@ -244,7 +245,7 @@ async def read_and_validate_file(
             updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
             if updated_at <= result:
                 return None
-            print(f"File is updated: {filepath}. Reindexing.")
+            logger.info(f"File is updated: {filepath}. Reindexing.")
 
     updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
     return file_content, updated_at
@@ -369,12 +370,12 @@ async def process_file(
         await create_document_fragment(
             session,
             document_id=document.id,
-            summary=summary,
             fragment_content=fragment,
+            summary=summary,
             vector=vector,
-            updated_at=updated_at,
             meta=metadata,
             hierarchy_meta=hierarchy_meta,
+            updated_at=updated_at,
         )
 
     # Update sibling relationships for fragments

@@ -33,9 +33,6 @@ def upgrade() -> None:
     op.create_index('idx_document_filepath', 'documents', ['filepath'], unique=False)
     op.create_index('idx_document_path_array', 'documents', ['path_array'], unique=False, postgresql_using='gin')
 
-    # First drop the dependent tsv_content column
-    op.drop_column('documents', 'tsv_content')
-
     # Then we can safely drop file_content
     op.drop_column('documents', 'file_content')
 

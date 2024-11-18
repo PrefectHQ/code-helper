@@ -2,15 +2,8 @@ import os
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-from numpy import array
 import pytest
 from sqlalchemy import select
-
-from sqlalchemy.orm import relationship, sessionmaker
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy import pool
-
-import pytest_asyncio
 
 from code_helper.index import (
     process_document_content,
@@ -18,16 +11,17 @@ from code_helper.index import (
     process_fragments,
     read_and_validate_file,
 )
+from code_helper.models import Document, DocumentFragment
+
 
 # Mock for marvin.fn decorator
 def mock_marvin_fn(f):
     return f
 
 
-# Common fixtures
 @pytest.fixture
 def mock_session():
-    session = MagicMock()
+    session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     return session
@@ -46,34 +40,39 @@ class TestClass:
     file_path = tmp_path / "test.py"
     file_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
     file_path.write_text(content)
-    return str(file_path)
+
+    yield str(file_path)
+
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
 
-# Helper class for async mock
 class AsyncMock(MagicMock):
     async def __call__(self, *args, **kwargs):
         return super(AsyncMock, self).__call__(*args, **kwargs)
 
 
-# Stage 1: File Reading and Validation Tests
 @pytest.mark.asyncio
 async def test_read_and_validate_file_new_file(mock_session, sample_python_file):
-    # Create an AsyncMock for execute that returns None for scalar
-    mock_result = AsyncMock()
+    # Create an AsyncMock for execute that returns None for scalar()
+    mock_result = MagicMock()
     mock_result.scalar.return_value = None
     mock_session.execute = AsyncMock(return_value=mock_result)
     mock_session.commit = AsyncMock()
 
     # Ensure the file exists and is readable
-    with open(sample_python_file, 'r') as f:
+    with open(sample_python_file, "r") as f:
         expected_content = f.read()
 
     # Mock the file modification time
     mock_mtime = datetime.now().timestamp()
-    with patch('os.path.getmtime', return_value=mock_mtime):
+    with patch("os.path.getmtime", return_value=mock_mtime):
         # Await the execute call
         content, updated_at = await read_and_validate_file(
-            sample_python_file, mock_session, replace_existing=False, reindex_updated=False
+            sample_python_file,
+            mock_session,
+            replace_existing=False,
+            reindex_updated=False,
         )
 
         # Verify the mock was called correctly
@@ -89,6 +88,7 @@ async def test_read_and_validate_file_existing_no_replace(
     mock_session, sample_python_file
 ):
     # Mock existing file in DB
+    mock_session.execute = AsyncMock()
     mock_session.execute.return_value.scalar.return_value = datetime.now()
 
     result = await read_and_validate_file(
@@ -98,23 +98,22 @@ async def test_read_and_validate_file_existing_no_replace(
     assert result is None
 
 
-# Stage 2: Document Processing Tests
 @pytest.fixture
 def mock_ai_functions():
-    with patch('code_helper.index.clean_text') as mock_clean, \
-         patch('code_helper.index.batch_process_with_retries') as mock_batch, \
-         patch('code_helper.index.generate_embeddings') as mock_embed:
+    with patch("code_helper.index.clean_text") as mock_clean, patch(
+        "code_helper.index.run_with_retries"
+    ) as mock_run, patch("code_helper.index.generate_embeddings") as mock_embed:
 
         async def mock_clean_impl(text):
             return text.replace("\x00", "")
 
         mock_clean.side_effect = mock_clean_impl
-        mock_batch.return_value = ["This is a mock summary"]
+        mock_run.return_value = ["This is a mock summary"]
         mock_embed.return_value = [0.1] * 768  # Mock embedding vector
 
         yield {
             "clean_text": mock_clean,
-            "batch_process": mock_batch,
+            "run_with_retries": mock_run,
             "generate_embeddings": mock_embed,
         }
 
@@ -135,8 +134,8 @@ def test_function():
     # Verify clean_text was called
     mock_ai_functions["clean_text"].assert_called_once_with(test_content)
 
-    # Verify batch_process_with_retries was called for summary
-    mock_ai_functions["batch_process"].assert_called_once()
+    # Verify run_with_retries was called for summary
+    mock_ai_functions["run_with_retries"].assert_called_once()
 
     # Verify generate_embeddings was called
     mock_ai_functions["generate_embeddings"].assert_called_once()
@@ -187,7 +186,6 @@ class TestClass:
     assert any(c["name"] == "TestClass" for c in file_metadata.get("classes", []))
 
 
-# Stage 3: Fragment Processing Tests
 @pytest.fixture
 def mock_fragment_functions():
     with patch("code_helper.index.generate_embeddings") as mock_embed:
@@ -208,7 +206,7 @@ class TestClass:
     def method1(self):
         pass
 """
-    fragments, fragment_vectors, fragment_metadata = await process_fragments(
+    fragments, fragment_summaries, fragment_vectors, fragment_metadata = await process_fragments(
         test_content
     )
 
@@ -227,6 +225,10 @@ class TestClass:
     assert len(fragment_metadata) == len(fragments)
     assert all(isinstance(m, dict) for m in fragment_metadata)
 
+    # Check summaries
+    assert len(fragment_summaries) == len(fragments)
+    assert all(isinstance(s, str) for s in fragment_summaries)
+
 
 @pytest.mark.asyncio
 async def test_process_fragments_nested_classes():
@@ -239,7 +241,7 @@ class OuterClass:
     def outer_method(self):
         pass
 """
-    fragments, _, fragment_metadata = await process_fragments(test_content)
+    fragments, _, _, fragment_metadata = await process_fragments(test_content)
 
     # Check fragment extraction
     assert len(fragments) == 4  # OuterClass, InnerClass, inner_method, outer_method
@@ -266,7 +268,7 @@ def documented_function():
     """
     return True
 '''
-    fragments, _, fragment_metadata = await process_fragments(test_content)
+    fragments, _, _, fragment_metadata = await process_fragments(test_content)
 
     # Check that docstring is preserved in fragment
     assert len(fragments) == 1
@@ -281,65 +283,18 @@ def documented_function():
 @pytest.mark.asyncio
 async def test_process_fragments_empty_file():
     test_content = "# Just a comment\n\n"
-    fragments, fragment_vectors, fragment_metadata = await process_fragments(
+    fragments, fragment_summaries, fragment_vectors, fragment_metadata = await process_fragments(
         test_content
     )
 
     # Should handle empty files gracefully
     assert len(fragments) == 0
+    assert len(fragment_summaries) == 0
     assert len(fragment_vectors) == 0
     assert len(fragment_metadata) == 0
 
 
 # Stage 4: Database Operations Tests
-
-@pytest_asyncio.fixture
-async def test_engine():
-    """Create a test database and handle setup/teardown"""
-    # Test database configuration
-    TEST_DB_URL = (
-        "postgresql+asyncpg://code_helper:help-me-code@localhost:5432/code_helper_test"
-    )
-
-    # Set environment variable for test database
-    os.environ["DATABASE_URL"] = TEST_DB_URL
-
-    # Import models after setting DATABASE_URL
-    from code_helper.models import async_drop_db, init_db
-
-    ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
-    test_engine = create_async_engine(
-        TEST_DB_URL,
-        echo=ECHO_SQL_QUERIES,
-        poolclass=pool.NullPool  # Prevent connection pool issues
-    )
-
-    # Initialize test database
-    await init_db(test_engine)
-
-    yield test_engine
-
-    # Cleanup - ensure all connections are closed
-    await test_engine.dispose()
-    await async_drop_db()
-
-
-@pytest_asyncio.fixture
-async def db_session(test_engine):
-    async_session = sessionmaker(
-        test_engine,
-        class_=AsyncSession,
-        expire_on_commit=False
-    )
-    async with async_session() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
 
 
 @pytest.mark.asyncio
@@ -400,7 +355,6 @@ async def test_process_file_hierarchy(db_session, mock_ai_functions, tmp_path):
 
     from code_helper.models import Document
 
-    # Check that both files are in the database with correct path information
     query = select(Document).where(Document.path_array.contains(["src", "module"]))
     result = await db_session.execute(query)
     documents = result.scalars().all()
@@ -409,14 +363,14 @@ async def test_process_file_hierarchy(db_session, mock_ai_functions, tmp_path):
 
     # Verify path information
     for doc in documents:
-        assert doc.path_array[:2] == ["src", "module"]
+        assert doc.path_array[-3:] == ["src", "module", doc.filename]
         assert doc.filename in ["file1.py", "file2.py"]
         assert isinstance(doc.hierarchy_meta, dict)
         assert "children" in doc.hierarchy_meta
 
 
 @pytest.mark.asyncio
-async def test_process_file_with_class_hierarchy(db_session, mock_ai_functions):
+async def test_process_file_with_class_hierarchy(db_session, mock_ai_functions, tmp_path):
     test_content = """
 class ParentClass:
     def parent_method(self):
@@ -429,49 +383,47 @@ class ParentClass:
     def another_method(self):
         pass
 """
-    test_file = "test_hierarchy.py"
-    with open(test_file, "w") as f:
-        f.write(test_content)
+    # Use tmp_path to create a temporary file
+    test_file = tmp_path / "test_hierarchy.py"
+    test_file.write_text(test_content)
 
-    try:
-        # Process the file
-        await process_file(test_file, db_session)
+    # Process the file
+    await process_file(str(test_file), db_session)
 
-        from code_helper.models import Document, DocumentFragment
+    from code_helper.models import Document, DocumentFragment
 
-        # Get the document
-        query = select(Document).where(Document.filename == "test_hierarchy.py")
-        result = await db_session.execute(query)
-        document = result.scalar_one()
+    # Get the document
+    query = select(Document).where(Document.filename == "test_hierarchy.py")
+    result = await db_session.execute(query)
+    document = result.scalar_one()
 
-        # Get fragments
-        query = select(DocumentFragment).where(
-            DocumentFragment.document_id == document.id
-        )
-        result = await db_session.execute(query)
-        fragments = result.scalars().all()
+    # Get fragments
+    query = select(DocumentFragment).where(
+        DocumentFragment.document_id == document.id
+    )
+    result = await db_session.execute(query)
+    fragments = result.scalars().all()
+    
+    for fragment in fragments:
+        print(f"Fragment: {fragment.meta}")
 
-        # Verify class hierarchy
-        parent_class_methods = [
-            f for f in fragments if f.meta.get("parent") == "ParentClass"
-        ]
-        nested_class_methods = [
-            f for f in fragments if f.meta.get("parent") == "NestedClass"
-        ]
+    # Verify class hierarchy
+    parent_class_methods = [
+        f for f in fragments if f.meta.get("parent") == "ParentClass"
+    ]
+    nested_class_methods = [
+        f for f in fragments if f.meta.get("parent") == "NestedClass"
+    ]
 
-        assert len(parent_class_methods) == 2  # parent_method and another_method
-        assert len(nested_class_methods) == 1  # nested_method
+    assert len(parent_class_methods) == 2  # parent_method and another_method
+    assert len(nested_class_methods) == 1  # nested_method
 
-        # Check that methods have correct sibling relationships
-        for method in parent_class_methods:
-            print(f"----> Method: {method.meta.get('name')} {method.meta}")
-            assert len(method.meta.get("siblings", [])) == 1
-            assert method.meta["siblings"][0] in ["parent_method", "another_method"]
-            assert method.meta["siblings"][0] != method.meta["name"]
-
-    finally:
-        if os.path.exists(test_file):
-            os.remove(test_file)
+    # Check that methods have correct sibling relationships
+    for method in parent_class_methods:
+        print(f"----> Method: {method.meta.get('name')} {method.meta}")
+        assert len(method.meta.get("siblings", [])) == 1
+        assert method.meta["siblings"][0] in ["parent_method", "another_method"]
+        assert method.meta["siblings"][0] != method.meta["name"]
 
 
 @pytest.mark.asyncio
@@ -482,14 +434,12 @@ async def test_process_file_reindexing(
     await process_file(sample_python_file, db_session)
 
     # Modify the file
-    with open(sample_python_file, "a") as f:
+    with open(sample_python_file, "w") as f:
         f.write("\ndef new_function(): pass\n")
 
     # Reindex with replace_existing=True
     result = await process_file(sample_python_file, db_session, replace_existing=True)
     assert result is True
-
-    from code_helper.models import Document, DocumentFragment
 
     # Check that the new function was indexed
     query = (

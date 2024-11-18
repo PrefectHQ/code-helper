@@ -87,39 +87,30 @@ def extract_code_fragments_from_file(filepath: str) -> dict[str, list[tuple[ast.
     }
 
 
-def extract_metadata_from_node(
-    node: Union[ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef],
-) -> dict[str, Any]:
-    """Extract metadata from an AST node representing a function or class."""
+def extract_metadata_from_node(node: ast.AST) -> dict:
+    metadata = {
+        "name": getattr(node, "name", None),
+        "type": "function" if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else "class",
+        "decorators": [ast.unparse(d) for d in getattr(node, "decorator_list", [])],
+    }
+    
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        metadata = {
-            "type": "method" if hasattr(node, "parent_class") else "function",
-            "name": node.name,
+        metadata.update({
             "is_async": isinstance(node, ast.AsyncFunctionDef),
-            "parameters": [
-                f"{arg.arg}: {ast.unparse(arg.annotation) if arg.annotation else 'Any'}"
-                for arg in node.args.args
-            ],
+            "parameters": [ast.unparse(arg) for arg in node.args.args],
             "return_type": ast.unparse(node.returns) if node.returns else None,
-            "decorators": [ast.unparse(d) for d in node.decorator_list],
-        }
-
-        # Add parent class information if this is a method
+            "docstring": ast.get_docstring(node) or "",
+        })
+        
         if hasattr(node, "parent_class"):
+            metadata["type"] = "method"
             metadata["parent"] = node.parent_class
             metadata["parent_classes"] = [node.parent_class]
-
-        return metadata
+            
     elif isinstance(node, ast.ClassDef):
-        return {
-            "type": "class",
-            "name": node.name,
-            "parent_classes": [ast.unparse(base) for base in node.bases],
-            "decorators": [ast.unparse(d) for d in node.decorator_list],
-            "methods": [],  # Will be populated when processing class body
-            "attributes": [],  # Will be populated when processing class body
-        }
-    return {}
+        metadata["docstring"] = ast.get_docstring(node) or ""
+        
+    return metadata
 
 
 def extract_class_attributes(node: ast.ClassDef) -> list[dict[str, Any]]:
