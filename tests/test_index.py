@@ -49,6 +49,7 @@ class TestClass:
 
 class AsyncMock(MagicMock):
     async def __call__(self, *args, **kwargs):
+        print(f"AsyncMock called with {args} and {kwargs}")
         return super(AsyncMock, self).__call__(*args, **kwargs)
 
 
@@ -68,7 +69,7 @@ async def test_read_and_validate_file_new_file(mock_session, sample_python_file)
     mock_mtime = datetime.now().timestamp()
     with patch("os.path.getmtime", return_value=mock_mtime):
         # Await the execute call
-        content, updated_at = await read_and_validate_file(
+        mock_call_result = await read_and_validate_file(
             sample_python_file,
             mock_session,
             replace_existing=False,
@@ -78,9 +79,9 @@ async def test_read_and_validate_file_new_file(mock_session, sample_python_file)
         # Verify the mock was called correctly
         mock_session.execute.assert_called_once()
 
-        assert content == expected_content
-        assert isinstance(updated_at, datetime)
-        assert updated_at == datetime.fromtimestamp(mock_mtime)
+        assert mock_call_result[0] == expected_content
+        assert isinstance(mock_call_result[1], datetime)
+        assert mock_call_result[1] == datetime.fromtimestamp(mock_mtime)
 
 
 @pytest.mark.asyncio
@@ -108,7 +109,11 @@ def mock_ai_functions():
             return text.replace("\x00", "")
 
         mock_clean.side_effect = mock_clean_impl
-        mock_run.return_value = ["This is a mock summary"]
+        
+        async def mock_run_impl(llm_task, inputs, **kwargs):
+            return ["This is a mock summary"] * len(inputs)
+        
+        mock_run.side_effect = mock_run_impl
         mock_embed.return_value = [0.1] * 768  # Mock embedding vector
 
         yield {
@@ -325,7 +330,10 @@ async def test_process_file_database_operations(
     query = select(DocumentFragment).where(DocumentFragment.document_id == document.id)
     result = await db_session.execute(query)
     fragments = result.scalars().all()
-
+    
+    for fragment in fragments:
+        print(f"Fragment: {fragment.meta}")
+    
     # Should have fragments for hello() and TestClass
     assert len(fragments) == 3  # hello function, TestClass, "method" method
 

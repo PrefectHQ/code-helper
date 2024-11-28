@@ -29,7 +29,7 @@ async def test_engine():
     os.environ["DATABASE_URL"] = TEST_DB_URL
 
     # Import models after setting DATABASE_URL
-    from code_helper.models import async_drop_db, init_db
+    from code_helper.models import init_db
 
     ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
     test_engine = create_async_engine(
@@ -38,15 +38,12 @@ async def test_engine():
         poolclass=pool.NullPool  # Prevent connection pool issues
     )
 
-    # Initialize test database
     await init_db(test_engine)
 
     try:
         yield test_engine
     finally:
-        # Cleanup - ensure all connections are closed
         await test_engine.dispose()
-        await async_drop_db()
 
 
 @pytest_asyncio.fixture

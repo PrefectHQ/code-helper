@@ -25,7 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 
 ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
@@ -305,14 +305,26 @@ Document.fragments = relationship(
 
 
 @asynccontextmanager
-async def get_session() -> AsyncSession:
+async def get_session():
     async with SessionLocal() as session:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+            if session.sync_session._connection_for_bind:
+                await session.sync_session._connection_for_bind.close()
 
 
 async def async_drop_db(db_engine=engine):
     async with db_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        try:
+            await conn.run_sync(Base.metadata.drop_all)
+        finally:
+            await conn.close()
 
 
 async def init_db(db_engine=engine):

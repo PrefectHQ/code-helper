@@ -225,7 +225,7 @@ async def read_and_validate_file(
     query = await session.execute(
         select(Document.updated_at).where(Document.filepath == filepath)
     )
-    result: datetime = query.scalar()
+    result: datetime | None = await query.scalar()
     print(f"Result: {result}")
 
     if result is not None:
@@ -356,6 +356,7 @@ async def process_file(
     for idx, (fragment, summary, vector, metadata) in enumerate(
         zip(fragments, summaries, fragment_vectors, fragment_metadata)
     ):
+        print(f"Metadata: {metadata}")
         # For methods, ensure parent_classes is set
         if metadata.get("type") == "function" and metadata.get("parent"):
             if "parent_classes" not in metadata:
