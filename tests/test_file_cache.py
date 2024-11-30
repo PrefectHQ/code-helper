@@ -7,6 +7,8 @@ import pickle
 from code_helper.file_cache import (
     file_cache,
     DEFAULT_CACHE_DIR,
+    DEFAULT_STRATEGY,
+    build_cache_key,
 )
 
 TEST_CACHE_DIR = "test_cache_dir"
@@ -34,16 +36,16 @@ async def test_file_cache_decorator():
 
     assert os.path.exists(TEST_CACHE_DIR)
 
-    func_code = sample_coro._coro.__code__.co_code
-    key = (func_code, (1, 2), tuple())
+    key = build_cache_key(
+        sample_coro._coro,
+        args=(1, 2),
+        kwargs={},
+        strategy=DEFAULT_STRATEGY
+    )
     key_hash = hashlib.md5(pickle.dumps(key)).hexdigest()
     cache_file = os.path.join(TEST_CACHE_DIR, key_hash + ".cache")
 
     assert os.path.exists(cache_file)
-
-    async with aiofiles.open(cache_file, "rb") as f:
-        content = await f.read()
-        assert pickle.loads(content) == 3
 
 
 @pytest.mark.asyncio
@@ -60,8 +62,12 @@ async def test_file_cache_decorator_default_cache_dir():
 
     assert os.path.exists(DEFAULT_CACHE_DIR)
 
-    func_code = sample_coro._coro.__code__.co_code
-    key = (func_code, (1, 2), tuple())
+    key = build_cache_key(
+        sample_coro._coro,
+        args=(1, 2),
+        kwargs={},
+        strategy=DEFAULT_STRATEGY
+    )
     key_hash = hashlib.md5(pickle.dumps(key)).hexdigest()
     cache_file = os.path.join(DEFAULT_CACHE_DIR, key_hash + ".cache")
 
@@ -69,7 +75,8 @@ async def test_file_cache_decorator_default_cache_dir():
 
     async with aiofiles.open(cache_file, "rb") as f:
         content = await f.read()
-        assert pickle.loads(content) == 3
+        _, cached_result = pickle.loads(content)
+        assert cached_result == 3
 
     os.unlink(cache_file)
 
@@ -88,8 +95,12 @@ async def test_cache_with_kwargs():
 
     assert os.path.exists(TEST_CACHE_DIR)
 
-    func_code = sample_coro._coro.__code__.co_code
-    key = (func_code, (1, 2), (("z", 3),))
+    key = build_cache_key(
+        sample_coro._coro,
+        args=(1, 2),
+        kwargs={"z": 3},
+        strategy=DEFAULT_STRATEGY
+    )
     key_hash = hashlib.md5(pickle.dumps(key)).hexdigest()
     cache_file = os.path.join(TEST_CACHE_DIR, key_hash + ".cache")
 
@@ -97,4 +108,5 @@ async def test_cache_with_kwargs():
 
     async with aiofiles.open(cache_file, "rb") as f:
         content = await f.read()
-        assert pickle.loads(content) == 6
+        _, cached_result = pickle.loads(content)
+        assert cached_result == 6

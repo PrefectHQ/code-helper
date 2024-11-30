@@ -1,6 +1,7 @@
 import pytest
 from datetime import datetime, UTC
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from code_helper.models import (
     Document,
@@ -10,20 +11,8 @@ from code_helper.models import (
 )
 
 
-@pytest.fixture(scope="function")
-async def db_session():
-    async with get_session() as session:
-        # Start a transaction
-        async with session.begin():
-            # Give us the session
-            yield session
-            # Automatically rolls back after the test
-        # Session is closed automatically when exiting the context
-
-
 @pytest.mark.asyncio
 async def test_document_creation(db_session):
-    # Create a test document
     doc = Document(
         filename="test.py",
         filepath="/path/to/test.py",
@@ -37,7 +26,6 @@ async def test_document_creation(db_session):
     db_session.add(doc)
     await db_session.commit()
 
-    # Query the document
     result = await db_session.execute(select(Document).where(Document.filename == "test.py"))
     saved_doc = result.scalar_one()
 
@@ -74,7 +62,9 @@ async def test_document_fragment_relationship(db_session):
 
     # Query the relationship
     result = await db_session.execute(
-        select(Document).where(Document.id == doc.id)
+        select(Document)
+        .options(selectinload(Document.fragments))
+        .where(Document.id == doc.id)
     )
     saved_doc = result.scalar_one()
     
@@ -90,7 +80,7 @@ async def test_document_directory_contents(db_session):
         Document(
             filename=f"test{i}.py",
             filepath=f"/path/to/dir/test{i}.py",
-            path_array=["path", "to", "dir"],
+            path_array=["path", "to", "dir", f"test{i}.py"],
             vector=[0.1] * 768,
         )
         for i in range(3)
@@ -101,10 +91,11 @@ async def test_document_directory_contents(db_session):
 
     # Test get_directory_contents
     result = await Document.get_directory_contents(db_session, "/path/to/dir")
-    files = (await result.scalars().all())
-    
+    files = list(result)
+
     assert len(files) == 3
-    assert all(doc.path_array == ["path", "to", "dir"] for doc in files)
+    for doc in files:
+        assert doc.path_array == ["path", "to", "dir", doc.filename]
 
 
 @pytest.mark.asyncio
@@ -129,7 +120,7 @@ async def test_document_search_by_text(db_session):
 
     # Test text search
     results = await Document.search_by_text(db_session, "Python functions")
-    docs = await results.all()
+    docs = list(results)
     
     assert len(docs) == 1
     assert docs[0].filename == "test1.py"
@@ -171,7 +162,7 @@ async def test_hybrid_search(db_session):
     )
 
     assert len(results) > 0
-    assert all("test_function" in r.fragment_content for r in results)
+    assert all("test_function" in r["fragment_content"] for r in results)
 
 
 @pytest.mark.asyncio
@@ -210,9 +201,9 @@ async def test_document_fragment_search(db_session):
 
 @pytest.mark.asyncio
 async def test_get_session_context_manager():
-    async with get_session() as session:
+    async with get_session() as db_session:
         # Test that we can execute a simple query
-        result = await session.execute(select(Document))
+        result = await db_session.execute(select(Document))
         assert result is not None
 
 

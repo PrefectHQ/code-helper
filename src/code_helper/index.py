@@ -1,8 +1,9 @@
+import ast
 import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import wraps
 from logging import getLogger
 from typing import Any, Coroutine
@@ -222,33 +223,25 @@ async def read_and_validate_file(
         logger.error(f"File is empty: {filepath}")
         return None
 
-    query = await session.execute(
+    # Get file modification time
+    mtime = os.path.getmtime(filepath)
+    file_updated_at = datetime.fromtimestamp(mtime, tz=UTC)
+
+    # Execute query and get result
+    result = await session.execute(
         select(Document.updated_at).where(Document.filepath == filepath)
     )
-    result: datetime | None = await query.scalar()
-    print(f"Result: {result}")
+    existing_timestamp = result.scalar()
 
-    if result is not None:
-        if not replace_existing:
-            logger.error(f"File already indexed in database and not replacing: {filepath}")
-            return None
-        # Delete existing document and its fragments
-        logger.info(f"Deleting existing document: {filepath}")
-        await session.execute(
-            delete(DocumentFragment).where(
-                DocumentFragment.document.has(filepath=filepath)
-            )
-        )
-        await session.execute(delete(Document).where(Document.filepath == filepath))
-        await session.commit()
-        if reindex_updated:
-            updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
-            if updated_at <= result:
-                return None
-            logger.info(f"File is updated: {filepath}. Reindexing.")
+    # For new files, return the current file timestamp
+    if existing_timestamp is None:
+        return file_content, file_updated_at  # We should be hitting this case
 
-    updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
-    return file_content, updated_at
+    # For existing files, handle based on flags
+    if replace_existing or (reindex_updated and file_updated_at > existing_timestamp):
+        return file_content, file_updated_at
+    
+    return None
 
 
 async def process_document_content(content: str) -> tuple[str, list, dict, str]:
@@ -262,7 +255,7 @@ async def process_document_content(content: str) -> tuple[str, list, dict, str]:
 
 async def process_fragments(
     content: str,
-) -> tuple[list[str], list[str], list[list[float]], list[dict]]:
+) -> tuple[list[str], list[str], list[list[float]], list[dict], list[dict]]:
     """Process code fragments to generate embeddings and metadata."""
     fragment_tuples = extract_code_fragments_from_file_content(content)
     nodes, fragments = zip(*fragment_tuples) if fragment_tuples else ([], [])
@@ -278,15 +271,62 @@ async def process_fragments(
         ]
     fragment_vectors = [f.result() for f in fragment_vectors_tasks]
 
+    # Extract basic metadata
     fragment_metadata = [extract_metadata_from_node(node) for node in nodes]
+    
+    # Build hierarchy metadata
+    hierarchy_metadata = []
+    for node, meta in zip(nodes, fragment_metadata):
+        hierarchy = {
+            "id": meta.get("name"),
+            "type": meta.get("type"),
+            "parent": None,
+            "children": []
+        }
+        
+        # Check for parent class/function
+        parent = getattr(node, "parent", None)
+        while parent and isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            hierarchy["parent"] = parent.name
+            break
+            
+        # For classes, collect child methods and nested classes
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    hierarchy["children"].append(child.name)
+                elif isinstance(child, ast.ClassDef):
+                    hierarchy["children"].append(child.name)
+                    
+        hierarchy_metadata.append(hierarchy)
 
-    return fragments, fragment_summaries, fragment_vectors, fragment_metadata
+    return fragments, fragment_summaries, fragment_vectors, fragment_metadata, hierarchy_metadata
 
 
 async def process_file(
     filepath: str, session, replace_existing=False, reindex_updated=False
 ) -> bool:
     """Main processing function that coordinates the stages."""
+    # If replace_existing, delete the old document first
+    if replace_existing:
+        # Find and delete existing document
+        result = await session.execute(
+            select(Document).where(Document.filepath == filepath)
+        )
+        existing_doc = result.scalar_one_or_none()
+        if existing_doc:
+            # Delete associated fragments first
+            await session.execute(
+                delete(DocumentFragment).where(
+                    DocumentFragment.document_id == existing_doc.id
+                )
+            )
+            # Then delete the document
+            await session.execute(
+                delete(Document).where(Document.id == existing_doc.id)
+            )
+            await session.commit()
+
     # Stage 1: File Reading and Validation
     result = await read_and_validate_file(
         filepath, session, replace_existing, reindex_updated
@@ -316,7 +356,7 @@ async def process_file(
     hierarchy_meta = {"children": [filename]}
 
     # Stage 3: Fragment Processing
-    fragments, summaries, fragment_vectors, fragment_metadata = await process_fragments(
+    fragments, summaries, fragment_vectors, fragment_metadata, hierarchy_metadata = await process_fragments(
         cleaned_content
     )
 
@@ -333,76 +373,20 @@ async def process_file(
         updated_at=updated_at,
     )
 
-    # Update parent's children list if parent exists
-    if parent_path:
-        parent_doc = await session.execute(
-            select(Document).where(Document.filepath == parent_path)
-        )
-        parent_doc = parent_doc.scalar_one_or_none()
-        if parent_doc:
-            current_meta = parent_doc.hierarchy_meta or {"children": []}
-            if "children" not in current_meta:
-                current_meta["children"] = []
-            if filename not in current_meta["children"]:
-                current_meta["children"].append(filename)
-
-            await session.execute(
-                update(Document)
-                .where(Document.filepath == parent_path)
-                .values(hierarchy_meta=current_meta)
+    # Create fragments
+    if fragments:
+        for fragment, summary, vector, metadata, hierarchy in zip(
+            fragments, summaries, fragment_vectors, fragment_metadata, hierarchy_metadata
+        ):
+            await create_document_fragment(
+                session,
+                document.id,
+                fragment,
+                summary,
+                vector,
+                metadata,
+                hierarchy_meta=hierarchy,
             )
-
-    # Process fragments with hierarchy information
-    for idx, (fragment, summary, vector, metadata) in enumerate(
-        zip(fragments, summaries, fragment_vectors, fragment_metadata)
-    ):
-        print(f"Metadata: {metadata}")
-        # For methods, ensure parent_classes is set
-        if metadata.get("type") == "function" and metadata.get("parent"):
-            if "parent_classes" not in metadata:
-                metadata["parent_classes"] = [metadata["parent"]]
-
-        hierarchy_meta = {
-            "parent": metadata.get("parent"),  # For methods within classes
-            "siblings": [],  # Will contain other fragments at same level
-            "index": idx,
-        }
-
-        await create_document_fragment(
-            session,
-            document_id=document.id,
-            fragment_content=fragment,
-            summary=summary,
-            vector=vector,
-            meta=metadata,
-            hierarchy_meta=hierarchy_meta,
-            updated_at=updated_at,
-        )
-
-    # Update sibling relationships for fragments
-    fragments_query = await session.execute(
-        select(DocumentFragment).where(DocumentFragment.document_id == document.id)
-    )
-    fragments_in_doc = fragments_query.scalars().all()
-
-    fragment_map = {}
-    for frag in fragments_in_doc:
-        parent = frag.meta.get("parent")  # Use meta instead of fragment_meta
-        if parent not in fragment_map:
-            fragment_map[parent] = []
-        name = frag.meta.get("name")
-        fragment_map[parent].append(name)
-        print(f"Adding {name} to parent {parent}")
-
-    # Update each fragment with its siblings
-    for frag in fragments_in_doc:
-        parent = frag.meta.get("parent")
-        siblings = fragment_map.get(parent, [])
-        if not frag.meta:
-            frag.meta = {}
-        frag.meta["siblings"] = [s for s in siblings if s != frag.meta.get("name")]
-        flag_modified(frag, "meta")
-        session.add(frag)
 
     await session.commit()
     print(f"Processed file: {filepath}")

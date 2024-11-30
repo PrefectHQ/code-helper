@@ -6,6 +6,8 @@ from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy import pool
 
+from code_helper.models import async_drop_db
+
 pytest_plugins = ["pytest_asyncio"]
 
 # Only necessary when we're testing Prefect flows, tasks, etc.
@@ -18,7 +20,7 @@ def prefect_test_fixture():
 
 
 @pytest_asyncio.fixture
-async def test_engine():
+async def SessionLocal():
     """Create a test database and handle setup/teardown"""
     # Test database configuration
     TEST_DB_URL = (
@@ -31,7 +33,7 @@ async def test_engine():
     # Import models after setting DATABASE_URL
     from code_helper.models import init_db
 
-    ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
+    ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "false").lower() == "true"
     test_engine = create_async_engine(
         TEST_DB_URL,
         echo=ECHO_SQL_QUERIES,
@@ -40,26 +42,24 @@ async def test_engine():
 
     await init_db(test_engine)
 
+    SessionLocal = sessionmaker(
+        bind=test_engine, expire_on_commit=False, class_=AsyncSession
+    )
+
     try:
-        yield test_engine
+        yield SessionLocal
     finally:
+        await async_drop_db(test_engine)
         await test_engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def db_session(test_engine):
-    async_session = sessionmaker(
-        test_engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False
-    )
-    async with async_session() as session:
+async def db_session(SessionLocal):
+    async with SessionLocal() as session:
         try:
             yield session
         except Exception:
             await session.rollback()
             raise
         finally:
-            await session.commit()
             await session.close()

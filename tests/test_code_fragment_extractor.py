@@ -6,6 +6,8 @@ from code_helper.code_fragment_extractor import (
 )
 import ast
 
+from code_helper.index import process_fragments
+
 
 @pytest.fixture
 def sample_code():
@@ -40,11 +42,9 @@ def standalone_function(x: int) -> int:
 def test_extract_code_fragments(sample_code):
     fragments = extract_code_fragments_from_file_content(sample_code)
 
-    # Verify we get (node, string) tuples
     assert len(fragments) == 6
     assert all(isinstance(f, tuple) and len(f) == 2 for f in fragments)
 
-    # Verify specific content in fragments (using string part)
     for expected_fragment in [
         "def simple_function",
         "async def async_function",
@@ -57,7 +57,6 @@ def test_extract_code_fragments(sample_code):
             expected_fragment in f[1] for f in fragments
         ), f"Expected {expected_fragment} not found"
 
-    # Verify method metadata
     for node, _ in fragments:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             metadata = extract_metadata_from_node(node)
@@ -77,16 +76,12 @@ def test_function(param1: str, param2: int = 0) -> bool:
 '''
     metadata = extract_metadata_from_fragment(code)
 
-    assert metadata["type"] == "module"
-    assert len(metadata["functions"]) == 1
-
-    function = metadata["functions"][0]
-    assert function["type"] == "function"
-    assert function["name"] == "test_function"
-    assert function["is_async"] is False
-    assert len(function["parameters"]) == 2
-    assert function["return_type"] == "bool"
-    assert function["decorators"] == []
+    assert metadata["type"] == "function"
+    assert metadata["name"] == "test_function"
+    assert metadata["is_async"] is False
+    assert len(metadata["parameters"]) == 2
+    assert metadata["return_type"] == "bool"
+    assert metadata["decorators"] == []
 
 
 def test_extract_metadata_class():
@@ -132,11 +127,10 @@ async def async_func(param: str) -> List[str]:
 """
     metadata = extract_metadata_from_fragment(code)
 
-    function = metadata["functions"][0]
-    assert function["is_async"] is True
-    assert function["name"] == "async_func"
-    assert function["parameters"] == ["param: str"]
-    assert function["return_type"] == "List[str]"
+    assert metadata["is_async"] is True
+    assert metadata["name"] == "async_func"
+    assert metadata["parameters"] == ["param: str"]
+    assert metadata["return_type"] == "List[str]"
 
 
 def test_extract_metadata_invalid_code():
@@ -230,6 +224,7 @@ class OuterClass:
 
 
 @pytest.mark.asyncio
+
 async def test_process_fragments_preserves_class_context():
     test_content = """
 class TestClass:
@@ -239,19 +234,19 @@ class TestClass:
     async def method2(self):
         pass
 """
-    fragments, vectors, metadata = await process_fragments(test_content)
+    fragments, fragment_summaries, fragment_vectors, fragment_metadata, hierarchy_metadata = await process_fragments(test_content)
 
     # Should have 3 fragments: class and two methods
     assert len(fragments) == 3
-    assert len(vectors) == 3
-    assert len(metadata) == 3
+    assert len(fragment_vectors) == 3
+    assert len(fragment_metadata) == 3
 
     # Verify class metadata
-    class_meta = next(m for m in metadata if m["type"] == "class")
+    class_meta = next(m for m in fragment_metadata if m["type"] == "class")
     assert class_meta["name"] == "TestClass"
 
     # Verify method metadata
-    method_metas = [m for m in metadata if m["type"] == "method"]
+    method_metas = [m for m in fragment_metadata if m["type"] == "method"]
     assert len(method_metas) == 2
 
     # Check regular method

@@ -28,6 +28,8 @@ class CodeExtractor(FragmentExtractor):
 
     def visit_ClassDef(self, node):
         previous_class = self.current_class
+        if previous_class:  # If there's a current class, this is a nested class
+            node.parent_class = previous_class
         self.current_class = node.name
         self.fragments.append((node, ast.unparse(node)))
         self.generic_visit(node)

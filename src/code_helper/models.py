@@ -57,7 +57,7 @@ class Document(Base):
     vector = Column(Vector(768), nullable=False)
     meta = Column(JSON, nullable=True)
     hierarchy_meta = Column(JSON, nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     __table_args__ = (
         Index("idx_document_path_array", path_array, postgresql_using="gin"),
@@ -67,13 +67,25 @@ class Document(Base):
 
     @classmethod
     async def get_directory_contents(cls, session, directory_path: str):
-        """Get all files and subdirectories in a directory."""
-        path_parts = directory_path.split(os.sep)
-        return await session.execute(
+        """Get all files and subdirectories in a directory.
+        
+        Args:
+            session: The database session
+            directory_path: Path to directory (e.g. "path/to/dir")
+        
+        Returns:
+            Query result containing all documents in the specified directory
+        """
+        path_parts = directory_path.strip("/").split("/")
+        
+        return await session.scalars(
             select(cls).where(
                 and_(
+                    # Length check: path_array should be one longer than path_parts
+                    # (because it includes the filename)
                     func.array_length(cls.path_array, 1) == len(path_parts) + 1,
-                    cls.path_array[: len(path_parts)].contains(path_parts),
+                    # Path check: first N elements should match path_parts
+                    cls.path_array[1:len(path_parts)].contains(path_parts)
                 )
             )
         )
@@ -166,7 +178,7 @@ class DocumentFragment(Base):
     vector = Column(Vector(768), nullable=True)
     meta = Column(JSON, nullable=True)
     hierarchy_meta = Column(JSON, nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     document = relationship("Document", back_populates="fragments")
 
@@ -235,7 +247,7 @@ class DocumentFragment(Base):
         if document_ids:
             query = query.where(cls.document_id.in_(document_ids))
 
-        query = query.order_by('similarity DESC').limit(limit)
+        query = query.order_by(text('similarity DESC')).limit(limit)
 
         results = await session.execute(query)
         return results.all()
@@ -309,14 +321,11 @@ async def get_session():
     async with SessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
             await session.rollback()
             raise
         finally:
             await session.close()
-            if session.sync_session._connection_for_bind:
-                await session.sync_session._connection_for_bind.close()
 
 
 async def async_drop_db(db_engine=engine):
