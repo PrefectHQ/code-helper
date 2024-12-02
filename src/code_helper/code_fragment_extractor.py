@@ -28,11 +28,21 @@ class CodeExtractor(FragmentExtractor):
 
     def visit_ClassDef(self, node):
         previous_class = self.current_class
-        if previous_class:  # If there's a current class, this is a nested class
+        
+        # Store parent class name on the node if this is a nested class
+        if previous_class:
             node.parent_class = previous_class
+            
+        # Update current class context
         self.current_class = node.name
+        
+        # Add fragment
         self.fragments.append((node, ast.unparse(node)))
+        
+        # Visit child nodes
         self.generic_visit(node)
+        
+        # Restore previous class context
         self.current_class = previous_class
 
 
