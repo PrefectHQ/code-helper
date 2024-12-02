@@ -14,9 +14,9 @@ logger = getLogger(__name__)
 
 
 app = FastAPI(
-    title="Embeddings Search API",
-    description="API to search for embeddings in a pgvector database.",
-    version="1.0.0",
+    title="Code Search API",
+    description="LLM-powered code search API.",
+    version="0.1.0",
 )
 
 
@@ -33,11 +33,10 @@ async def search_embeddings(request: SearchRequest):
     """
     async with get_session() as session:
         query_text = request.query_text
-        filenames = extract_filenames(query_text)
         query_vector = await generate_embeddings(query_text)
 
         results = await hybrid_search(
-            session, query_text, query_vector, filenames, limit=10
+            session, query_text, query_vector, limit=10
         )
         return {"results": results, "count": len(results)}
 

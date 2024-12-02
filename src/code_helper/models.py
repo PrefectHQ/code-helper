@@ -317,7 +317,6 @@ async def hybrid_search(
     session: AsyncSession,
     query_text: str,
     query_vector: list[float],
-    filenames: Optional[List[str]] = None,
     limit: int = 20,
 ) -> list[dict]:
     """Perform hybrid search across documents and fragments."""
