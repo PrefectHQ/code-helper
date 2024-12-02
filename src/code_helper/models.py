@@ -27,14 +27,12 @@ from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.pool import NullPool
 
 ECHO_SQL_QUERIES = os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "False").lower() == "true"
 
-DATABASE_URL = (
-    "postgresql+asyncpg://code_helper:help-me-code@localhost:5432/code_helper"
-)
-engine = create_async_engine(DATABASE_URL, echo=ECHO_SQL_QUERIES)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+engine = None
+SessionLocal = None
 Base = declarative_base()
 
 
@@ -362,16 +360,23 @@ async def hybrid_search(
         k=20
     )
 
-    # Convert to final format
+    # Update the results format
     results = []
     for fragment, score in fragment_results[:limit]:
+        # Get the parent document to access filename and filepath
+        document = await session.get(Document, fragment.document_id)
+        
         results.append({
             "id": fragment.id,
             "content": fragment.fragment_content,
             "summary": fragment.summary,
             "metadata": fragment.meta,
             "score": score,
-            "document_id": fragment.document_id
+            "document_id": str(fragment.document_id),  # Convert to string
+            "filename": document.filename,
+            "filepath": document.filepath,
+            "fragment_content": fragment.fragment_content,
+            "imports": document.meta.get("imports", [])
         })
 
     return results
@@ -421,3 +426,28 @@ async def read_and_validate_file(
 
     updated_at = datetime.fromtimestamp(os.path.getmtime(filepath))
     return file_content, updated_at
+
+
+def init_db_connection(database_url=None):
+    """Initialize database connection."""
+    global engine, SessionLocal
+    
+    if database_url is None:
+        database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://code_helper:help-me-code@localhost:5432/code_helper"
+        )
+    
+    engine = create_async_engine(
+        database_url,
+        echo=os.getenv("CODE_HELPER_ECHO_SQL_QUERIES", "false").lower() == "true",
+        poolclass=NullPool
+    )
+    
+    SessionLocal = sessionmaker(
+        bind=engine,
+        expire_on_commit=False,
+        class_=AsyncSession
+    )
+    
+    return engine, SessionLocal

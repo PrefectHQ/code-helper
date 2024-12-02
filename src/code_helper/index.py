@@ -117,8 +117,8 @@ async def generate_embeddings(text: str):
         text,
         return_tensors="pt",
         truncation=True,
-        max_length=512,  # Changed from 768 to 512
-        padding=True,  # Changed from 'max_length' to True
+        max_length=512,
+        padding=True,
     )
 
     with torch.no_grad():
