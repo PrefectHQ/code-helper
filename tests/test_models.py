@@ -104,7 +104,6 @@ async def test_hybrid_search(db_session):
         db_session,
         query_text="test function",
         query_vector=[0.2] * 768,
-        filenames=None,
         limit=10
     )
 

@@ -65,7 +65,8 @@ class Spaceship:
             print(f"{self.name} is not launched yet.")  
             
     def load_cargo(self, cargo: "Cargo"):
-        if self.cargo_weight + cargo.weight > self.max_cargo_weight:
+        current_weight = sum(c.weight for c in self.cargo)
+        if current_weight + cargo.weight > self.max_cargo_weight:
             print(f"{self.name} cannot load {cargo.name} because it would exceed the max cargo weight.")
         else:
             self.cargo.append(cargo)

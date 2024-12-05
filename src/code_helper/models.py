@@ -105,6 +105,9 @@ Document.fragments = relationship(
 
 @asynccontextmanager
 async def get_session():
+    if SessionLocal is None:
+        init_db_connection()
+        
     async with SessionLocal() as session:
         try:
             yield session
@@ -282,26 +285,28 @@ def reciprocal_rank_fusion(
 ) -> list[tuple[Any, float]]:
     """
     Combine vector and keyword search results using reciprocal rank fusion.
-
-    Args:
-        vector_results: List of tuples containing a search result and its similarity score.
-        keyword_results: List of tuples containing a search result and its keyword rank.
-        k: The constant used in the reciprocal rank fusion formula.
-
-    Returns:
-        List of tuples containing a search result and its combined rank.
+    Keyword matches are prioritized by considering them first in ranking.
     """
     # Create a map of item to its ranks in each result list
     rank_dict = defaultdict(float)
     
-    # Process vector search results
-    for rank, (item, _) in enumerate(vector_results):
-        rank_dict[item] += 1.0 / (rank + k)
-        
-    # Process keyword search results    
+    # First, process keyword results to give them priority in ranking
+    keyword_items = {item for item, _ in keyword_results}
+    
+    # Process keyword results first
     for rank, (item, _) in enumerate(keyword_results):
-        rank_dict[item] += 1.0 / (rank + k)
-        
+        # Higher base score for keyword matches
+        rank_dict[item] += 2.0 / (rank + k)
+    
+    # Then process vector results, but with lower weight for non-keyword matches
+    for rank, (item, _) in enumerate(vector_results):
+        if item not in keyword_items:
+            # Lower weight for vector-only matches
+            rank_dict[item] += 0.5 / (rank + k)
+        else:
+            # Small boost for items that appear in both
+            rank_dict[item] += 0.3 / (rank + k)
+    
     # Sort results by their cumulative rank
     sorted_results = sorted(
         [(item, score) for item, score in rank_dict.items()],
@@ -328,7 +333,7 @@ async def hybrid_search(
     for doc, rank in keyword_documents:
         print(f"Keyword - {doc.filename}: {rank}")
 
-    # Fuse document results
+    # Fuse document results with keyword boost
     document_results = reciprocal_rank_fusion(
         vector_documents,
         keyword_documents,
@@ -340,7 +345,7 @@ async def hybrid_search(
 
     # Get fragment-level matches from selected documents
     vector_fragments = await vector_search_document_fragments(
-        session, query_vector, doc_ids, limit=limit * 2
+        session, query_vector, doc_ids, limit=limit * 2,
     )
     keyword_fragments = await keyword_search_document_fragments(
         session, query_text, doc_ids, limit=limit * 2
@@ -353,7 +358,7 @@ async def hybrid_search(
     for fragment, rank in keyword_fragments:
         print(f"Keyword - {fragment.meta['name']}: {rank}")
 
-    # Fuse fragment results
+    # Fuse fragment results with keyword boost
     fragment_results = reciprocal_rank_fusion(
         vector_fragments,
         keyword_fragments,
@@ -365,8 +370,9 @@ async def hybrid_search(
     for fragment, score in fragment_results[:limit]:
         # Get the parent document to access filename and filepath
         document = await session.get(Document, fragment.document_id)
+        meta = document.meta or {}
         
-        results.append({
+        result = {
             "id": fragment.id,
             "content": fragment.fragment_content,
             "summary": fragment.summary,
@@ -375,9 +381,10 @@ async def hybrid_search(
             "document_id": str(fragment.document_id),  # Convert to string
             "filename": document.filename,
             "filepath": document.filepath,
-            "fragment_content": fragment.fragment_content,
-            "imports": document.meta.get("imports", [])
-        })
+            "imports": meta.get("imports", [])
+        }
+        
+        results.append(result)
 
     return results
 
