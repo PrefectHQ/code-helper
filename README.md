@@ -36,7 +36,7 @@ source env/bin/activate  # On Windows, use `env\Scripts\activate`
 3. **Install Dependencies**
 
 ```sh
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
 
 I usually install the package too:
