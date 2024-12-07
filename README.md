@@ -1,21 +1,18 @@
 # Code Search MCP Server with FastMCP
 
-A search API that combines keyword-based and vector-based searches to find relevant code snippets and documents. It uses PostgreSQL's native full-text search and adds vector search via pgvector. The results from both searches are combined using the Reciprocal Rank Fusion (RRF) algorithm to improve relevance.
-
-This API is meant for consumption from an LLM library or tool for Retrieval Augmented Search (RAG). The API is currently configured to run as an MCP server with FastMCP, usable by Claude.
+A search API that combines keyword-based and vector-based searches to find relevant code snippets and documents. The API is meant for consumption from an LLM library or tool for Retrieval Augmented Search (RAG) and is configured to run as an MCP server with FastMCP, usable by Claude.
 
 ## Features
 
-- **Keyword Search**: Full-text search on document contents, summaries, and filenames.
+- **Postgres** Uses PostgreSQL's native full-text search and pgvector.
+- **Keyword Search**: Full-text search on document and chunk contents, summaries, and filenames.
 - **Vector Search**: Semantic search using vector embeddings.
-- **Combined Results**: Uses the Reciprocal Rank Fusion (RRF) algorithm to merge results from both keyword and vector searches.
+- **Combined Results**: Uses the Reciprocal Rank Fusion (RRF) algorithm to merge results from keyword and vector searches.
 
 ## Prerequisites
 
 - Python 3.11+
 - PostgreSQL with pgvector extension
-- SQLAlchemy
-- Alembic for database migrations
 
 ## Installation
 
