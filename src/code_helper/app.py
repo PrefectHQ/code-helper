@@ -27,12 +27,13 @@ mcp = FastMCP("Code search MCP server", lifespan=lifespan)
 
 
 @mcp.tool()
-async def code_search(query_text: str, limit: int = 20, offset: int = 0) -> list[SearchResult]:
+async def code_search(request: SearchRequest) -> SearchResponse:
     """Search for code fragments using a hybrid keyword and vector search approach."""
     async with get_session() as session:
-        query_vector = await generate_embeddings(query_text)
+        query_vector = await generate_embeddings(request.query_text)
 
         results = await hybrid_search(
-            session, query_text, query_vector, limit=limit, offset=offset
+            session, request.query_text, query_vector,
+            limit=request.limit, offset=request.offset
         )
-        return {"results": results, "count": len(results)}
+        return SearchResponse(results=results, count=len(results))

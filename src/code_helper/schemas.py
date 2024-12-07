@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 class SearchRequest(BaseModel):
     query_text: str
+    limit: int = 20
+    offset: int = 0
 
 
 class SearchResultMetadata(BaseModel):

@@ -1,8 +1,8 @@
-# Code Helper Search API
+# Code Search MCP Server with FastMCP
 
 A search API that combines keyword-based and vector-based searches to find relevant code snippets and documents. It uses PostgreSQL's native full-text search and adds vector search via pgvector. The results from both searches are combined using the Reciprocal Rank Fusion (RRF) algorithm to improve relevance.
 
-This API is meant for consumption from an LLM library or tool for Retrieval Augmented Search (RAG).
+This API is meant for consumption from an LLM library or tool for Retrieval Augmented Search (RAG). The API is currently configured to run as an MCP server with FastMCP, usable by Claude.
 
 ## Features
 
@@ -12,7 +12,7 @@ This API is meant for consumption from an LLM library or tool for Retrieval Augm
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.11+
 - PostgreSQL with pgvector extension
 - SQLAlchemy
 - Alembic for database migrations
@@ -36,7 +36,13 @@ source env/bin/activate  # On Windows, use `env\Scripts\activate`
 3. **Install Dependencies**
 
 ```sh
-pip install -r prefect2.lock
+pip install -r requirements.txt
+```
+
+I usually install the package too:
+
+```sh
+pip install -e .
 ```
 
 4. **Configure the Database**
@@ -61,31 +67,35 @@ To start the server, run:
 make run-api
 ```
 
-### API Endpoints
+But you most likely want to run the server in dev mode:
 
-#### Search Endpoint
+```sh
+make run-api-dev
+```
 
-- **URL**: `/v1/search_embeddings`
-- **Method**: `POST`
-- **Request Body**:
-  ```json
-  {
-    "query_text": "search query here"
+Then you can test it in the MCP Inspector at http://localhost:5173.
+
+When you're ready to use it in Claude, you'll need to install the MCP server in Claude (see next section).
+
+### Installing the MCP server in Claude
+
+This server is more complex than the examples in the FastMCP docs, so I recommend editing your MCP server config by hand (in `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "Code search MCP server": {
+      "command": "/Users/andrew/src/code-helper/env/bin/uv",
+      "args": [
+        "run",
+        "-p",
+        "/Users/andrew/src/code-helper/env/bin/python",
+        "fastmcp",
+        "run",
+        "/Users/andrew/src/code-helper/src/code_helper/app.py"
+      ]
+    }
   }
-  ```
-- **Response**:
-  ```json
-  {
-    "results": [
-      {
-        "document_id": "1",
-        "score": 0.123,
-        "filename": "example.py",
-        "filepath": "/path/to/example.py",
-        "fragment_content": "def example_function(): ...",
-        "metadata": {}
-      },
-      ...
-    ]
-  }
-  ```
+}
+```
+**NOTE**: You'll need to replace the path to the Python binary and the path to the `app.py` file. After editing the config, restart Claude.

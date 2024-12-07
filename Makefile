@@ -15,11 +15,13 @@ help: ## Show this help
 
 .PHONY: run-api
 run-api: ## Run the API
-	uvicorn code_helper.app:app
+	# uvicorn code_helper.app:app
+	fastmcp run src/code_helper/app.py
 
 .PHONY: run-api-dev
 run-api-dev: ## Run the API in reload mode
-	uvicorn code_helper.app:app --reload
+	# uvicorn code_helper.app:app --reload
+	fastmcp dev src/code_helper/app.py
 
 .PHONY: create-embeddings
 create-embeddings: ## Run the processing code recursively with a directory
