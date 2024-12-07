@@ -205,6 +205,7 @@ async def keyword_search_document_fragments(
     query_text: str,
     document_ids: Optional[List[int]] = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[tuple[DocumentFragment, float]]:
     """Search document fragments using keyword matching."""
     # Convert terms to OR'd tsquery
@@ -228,7 +229,7 @@ async def keyword_search_document_fragments(
     if document_ids:
         query = query.where(DocumentFragment.document_id.in_(document_ids))
 
-    query = query.order_by(text('rank DESC')).limit(limit)
+    query = query.order_by(text('rank DESC')).offset(offset).limit(limit)
     
     result = await session.execute(query)
     return [(row.DocumentFragment, float(row.rank)) for row in result]
@@ -259,6 +260,7 @@ async def vector_search_document_fragments(
     query_vector: list[float],
     document_ids: Optional[List[int]] = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[tuple[DocumentFragment, float]]:
     """Search document fragments using vector similarity."""
     query = (
@@ -272,7 +274,7 @@ async def vector_search_document_fragments(
     if document_ids:
         query = query.where(DocumentFragment.document_id.in_(document_ids))
 
-    query = query.order_by(text('score DESC')).limit(limit)
+    query = query.order_by(text('score DESC')).offset(offset).limit(limit)
     
     result = await session.execute(query)
     return [(row.DocumentFragment, row.score) for row in result]
@@ -321,42 +323,24 @@ async def hybrid_search(
     query_text: str,
     query_vector: list[float],
     limit: int = 20,
+    offset: int = 0,
 ) -> list[dict]:
-    """Perform hybrid search across documents and fragments."""
-    # Get document-level matches and fuse results
-    vector_documents = await vector_search_documents(session, query_vector, limit=limit * 2)
-    keyword_documents = await keyword_search_documents(session, query_text, limit=limit * 2)
-
-    print("\nDocument scores:")
-    for doc, similarity in vector_documents:
-        print(f"Vector - {doc.filename}: {similarity}")
-    for doc, rank in keyword_documents:
-        print(f"Keyword - {doc.filename}: {rank}")
-
-    # Fuse document results with keyword boost
-    document_results = reciprocal_rank_fusion(
-        vector_documents,
-        keyword_documents,
-        k=20
-    )
-
-    # Get document IDs to constrain fragment search
-    doc_ids = [doc.id for doc, _ in document_results[:limit]]
+    """Perform hybrid search across fragments."""
 
     # Get fragment-level matches from selected documents
     vector_fragments = await vector_search_document_fragments(
-        session, query_vector, doc_ids, limit=limit * 2,
+        session, query_vector, limit=limit * 2, offset=offset
     )
     keyword_fragments = await keyword_search_document_fragments(
-        session, query_text, doc_ids, limit=limit * 2
+        session, query_text, limit=limit * 2, offset=offset
     )
 
     # Debug fragment scores
     print("\nFragment scores:")
     for fragment, score in vector_fragments:
-        print(f"Vector - {fragment.meta['name']}: {score}")
+        print(f"Vector - {fragment.meta.get('name')}: {score}")
     for fragment, rank in keyword_fragments:
-        print(f"Keyword - {fragment.meta['name']}: {rank}")
+        print(f"Keyword - {fragment.meta.get('name')}: {rank}")
 
     # Fuse fragment results with keyword boost
     fragment_results = reciprocal_rank_fusion(

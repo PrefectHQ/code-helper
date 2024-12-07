@@ -4,7 +4,6 @@ from pydantic import BaseModel
 
 class SearchRequest(BaseModel):
     query_text: str
-    filenames: Optional[List[str]] = None
 
 
 class SearchResultMetadata(BaseModel):

@@ -15,3 +15,5 @@ aiofiles
 transformers
 torch
 ruff
+prefect
+fastmcp
