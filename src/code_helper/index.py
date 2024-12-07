@@ -1,29 +1,34 @@
 import ast
 import asyncio
+from dataclasses import dataclass
 import logging
 import os
 import sys
 from datetime import UTC, datetime
 from functools import wraps
 from logging import getLogger
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Dict, Optional
 
 import aiofiles
 import click
 import marvin
+from prefect import flow, task
 import tiktoken
 import torch
 from dotenv import load_dotenv
 from sqlalchemy import and_, delete, func, select
 from transformers import AutoModel, AutoTokenizer
 from openai import RateLimitError, BadRequestError
+from prefect.cache_policies import TASK_SOURCE, INPUTS, RUN_ID, CachePolicy
+from prefect.context import TaskRunContext
+
 
 from code_helper.code_fragment_extractor import (
     extract_code_fragments_from_file_content,
     extract_metadata_from_fragment,
     extract_metadata_from_node,
 )
-from code_helper.file_cache import CacheStrategy, bust_file_cache, file_cache
+from code_helper.file_cache import CacheStrategy, bust_file_cache
 from code_helper.models import (
     Document,
     DocumentFragment,
@@ -55,6 +60,28 @@ AI_FN_CACHE_STRATEGY = (
     | CacheStrategy.kwargs
     | CacheStrategy.docstring
 )
+
+
+@dataclass
+class TaskDocstring(CachePolicy):
+    """
+    Policy for computing a cache key based on the task docstring.
+    """
+
+    def compute_key(
+        self,
+        task_ctx: TaskRunContext,
+        inputs: Optional[Dict[str, Any]],
+        flow_parameters: Optional[Dict[str, Any]],
+        **kwargs,
+    ) -> Optional[str]:
+        if not task_ctx:
+            return None
+        return task_ctx.task.fn.__doc__
+   
+
+AI_FN = TaskDocstring() + INPUTS
+IGNORE_SESSION = TASK_SOURCE + RUN_ID + (INPUTS - 'session')
 
 # Default token limits for OpenAI models based on docs
 DEFAULT_MODEL_TOKEN_LIMITS = {
@@ -92,6 +119,7 @@ DEFAULT_MODEL_TOKEN_LIMITS = {
     "text-moderation-stable": 32768,
     "text-moderation-007": 32768,
 }
+
 
 def get_model_token_limit(model: str) -> int:
     """
@@ -237,7 +265,7 @@ async def get_embedding_model():
     return _model, _tokenizer
 
 
-@file_cache(cache_strategy=AI_FN_CACHE_STRATEGY)
+@task(cache_policy=AI_FN)
 @marvin.fn
 async def summarize_code(code_fragment: str) -> str:
     """
@@ -277,7 +305,7 @@ async def summarize_code(code_fragment: str) -> str:
     """
 
 
-@file_cache
+@task(cache_policy=INPUTS + TASK_SOURCE)
 async def generate_embeddings(text: str):
     logger.info("Generating embeddings")
     model, tokenizer = await get_embedding_model()
@@ -298,11 +326,12 @@ async def generate_embeddings(text: str):
     return embeddings[0].tolist()
 
 
-@file_cache
+@task(cache_policy=INPUTS)
 async def clean_text(text):
     return text.replace("\x00", "")
 
 
+@task(cache_policy=INPUTS)
 async def estimate_tokens(text: str, model: str = "gpt-4o-mini") -> int:
     """Estimate the number of tokens in a text string for a given model."""
     try:
@@ -314,6 +343,7 @@ async def estimate_tokens(text: str, model: str = "gpt-4o-mini") -> int:
         return len(encoding.encode(text))
 
 
+@task(cache_policy=IGNORE_SESSION)
 async def read_and_validate_file(
     filepath: str, session, replace_existing: bool, reindex_updated: bool
 ) -> tuple[str, datetime] | None:
@@ -353,6 +383,7 @@ async def read_and_validate_file(
     return None
 
 
+@task
 async def process_document_content(content: str) -> tuple[str, list, dict, str]:
     """Process the document content to generate embeddings and metadata."""
     cleaned_content = await clean_text(content)
@@ -362,6 +393,7 @@ async def process_document_content(content: str) -> tuple[str, list, dict, str]:
     return cleaned_content, file_vector, file_metadata, file_summary[0]
 
 
+@task
 async def process_fragments(
     content: str,
 ) -> tuple[list[str], list[str], list[list[float]], list[dict], list[dict]]:
@@ -412,10 +444,11 @@ async def process_fragments(
     return fragments, fragment_summaries, fragment_vectors, fragment_metadata, hierarchy_metadata
 
 
+@flow
 async def process_file(
     filepath: str, session, replace_existing=False, reindex_updated=False
 ) -> bool:
-    """Main processing function that coordinates the stages."""
+    """Main processing function that coordinates indexing stages."""
     # If replace_existing, delete the old document first
     if replace_existing:
         # Find and delete existing document
@@ -434,9 +467,9 @@ async def process_file(
             await session.execute(
                 delete(Document).where(Document.id == existing_doc.id)
             )
-            await session.commit()
+            await session.flush()  # Make changes visible within transaction without committing
 
-    # Stage 1: File Reading and Validation
+    # Stage 1: Read and validate file
     result = await read_and_validate_file(
         filepath, session, replace_existing, reindex_updated
     )
@@ -444,7 +477,7 @@ async def process_file(
         return False
     file_content, updated_at = result
 
-    # Stage 2: Document Processing
+    # Stage 2: Process document content
     (
         cleaned_content,
         file_vector,
@@ -459,17 +492,16 @@ async def process_file(
     ):  # Remove empty string at start if path begins with separator
         path_parts = path_parts[1:]
     filename = path_parts[-1]
-    parent_path = os.sep.join(path_parts[:-1])
 
     # Build hierarchy metadata
     hierarchy_meta = {"children": [filename]}
 
-    # Stage 3: Fragment Processing
+    # Stage 3: Chunking into fragments
     fragments, summaries, fragment_vectors, fragment_metadata, hierarchy_metadata = await process_fragments(
         cleaned_content
     )
 
-    # Stage 4: Database Operations
+    # Stage 4: Insert document and fragments into the database
     document = await create_document(
         session,
         filename=filename,
@@ -540,7 +572,6 @@ def async_command(f):
     return wrapper
 
 
-# @flow(persist_result=True)
 @click.command()
 @click.argument("code_dirs", nargs=-1)
 @click.option(

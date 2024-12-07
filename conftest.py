@@ -3,11 +3,18 @@ from httpx import ASGITransport
 import pytest_asyncio
 import pytest
 
+from prefect.testing.utilities import prefect_test_harness
 
 from code_helper.index import process_file
 from code_helper.models import async_drop_db, init_db_connection, init_db
 
 pytest_plugins = ["pytest_asyncio"]
+
+
+@pytest.fixture(autouse=True, scope="session")
+def prefect_test_fixture():
+    with prefect_test_harness():
+        yield
 
 
 @pytest_asyncio.fixture(autouse=True)
