@@ -8,7 +8,7 @@ A search API that combines keyword-based and vector-based searches to find relev
 - **Keyword Search**: Full-text search on document and chunk contents, summaries, and filenames.
 - **Vector Search**: Semantic search using vector embeddings.
 - **Hybrid Relevance**: Uses [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (RRF) to merge results from keyword and vector searches.
-- **Recursive Summarization**: Shares some insights from [RAPTOR](https://arxiv.org/abs/2401.18059) - modules, classes, and functions are recursively summarized
+- **Recursive Summarization**: Shares some insights from [RAPTOR](https://arxiv.org/abs/2401.18059) - modules, classes, and functions are recursively summarized.
 
 ## Prerequisites
 
